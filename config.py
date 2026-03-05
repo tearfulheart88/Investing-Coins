@@ -155,3 +155,16 @@ STRATEGY_PARAMS: dict = {
         "macd_signal":  70,              # MACD 시그널 기간 (원본 명세: 70)
     },
 }
+
+# ─── Gemini API (전략 분석 & Claude 프롬프트 생성) ──────────────────────────
+GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MAX_TRADES: int = 50              # 분석에 사용할 최근 거래 수
+
+# ─── 수익 재진입 (Re-entry) ───────────────────────────────────────────────────
+# 수익 구간 매도 신호 발생 시 실제 매도하지 않고, 해당 가격을 새 매수단가로
+# 갱신하여 포지션을 유지합니다. 종목별 손절가는 새 단가 기준으로 재계산됩니다.
+#
+# REENTRY_ENABLED_SCENARIOS: 재진입을 활성화할 시나리오 ID 집합
+#   예) {"vb_noise_filter", "mr_rsi"}
+#       빈 set() = 전체 비활성화
+REENTRY_ENABLED_SCENARIOS: set = set()  # UI 또는 직접 편집으로 활성화

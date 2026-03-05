@@ -96,6 +96,7 @@ class TradingApp(tk.Tk):
         self._trade_log_wins: dict[str, tk.Toplevel] = {}  # 거래 로그 팝업 창 관리
         self._param_vars: dict[str, dict[str, tk.Variable]] = {}  # 전략 파라미터 슬라이더
         self._git_uploading = False   # GitHub 업로드 진행 여부
+        self._reentry_vars: dict[str, tk.BooleanVar] = {}  # 전략별 재진입 토글
 
         # 로그 큐
         self._log_queue: queue.Queue = queue.Queue(maxsize=2000)
@@ -523,6 +524,29 @@ class TradingApp(tk.Tk):
 
         p = config.STRATEGY_PARAMS
 
+        # ── 헬퍼: 재진입 토글 ──
+        def reentry_row(scenario_id: str) -> None:
+            """전략별 수익 재진입 토글 체크박스."""
+            var = tk.BooleanVar(value=(scenario_id in config.REENTRY_ENABLED_SCENARIOS))
+            self._reentry_vars[scenario_id] = var
+
+            def _on_toggle(*_):
+                if var.get():
+                    config.REENTRY_ENABLED_SCENARIOS.add(scenario_id)
+                else:
+                    config.REENTRY_ENABLED_SCENARIOS.discard(scenario_id)
+
+            var.trace_add("write", _on_toggle)
+            rf = tk.Frame(inner, bg=C.BG2); rf.pack(fill="x", padx=8, pady=(2, 4))
+            tk.Checkbutton(
+                rf,
+                text="🔄  수익 구간 매도 신호 → 재진입 (매도 없이 단가 갱신)",
+                variable=var,
+                font=("Arial", 8), fg=C.PEACH, bg=C.BG2,
+                selectcolor=C.BG3, activebackground=C.BG2, activeforeground=C.PEACH,
+                cursor="hand2",
+            ).pack(side="left")
+
         # ── VB 변동성돌파 (공통) ──
         section("▶  VB 변동성돌파 (공통)")
         vb = {
@@ -542,6 +566,8 @@ class TradingApp(tk.Tk):
         slider_row("최소 수익률 기준 (%)",   vb["min_momentum_pct"],  0.0, 3.0, 0.1,  "{:.1f}%")
         slider_row("거래량 급증 배수 (5분봉)", vb["vol_mult"],         1.0, 5.0, 0.5,  "×{:.1f}")
         self._param_vars["vb"] = vb
+        reentry_row("vb_noise_filter")
+        reentry_row("vb_standard")
 
         # ── mr_rsi ──
         section("▶  RSI 과매도 (mr_rsi)")
@@ -559,6 +585,7 @@ class TradingApp(tk.Tk):
         slider_row("ADX 횡보 분기 기준",     rsi["adx_range_thr"], 10, 30, 1,   "ADX<{:.0f}")
         slider_row("최대 보유 시간",         rsi["max_hold_hours"], 6, 72, 2,   "{:.0f}h")
         self._param_vars["mr_rsi"] = rsi
+        reentry_row("mr_rsi")
 
         # ── mr_bollinger ──
         section("▶  볼린저+RSI (mr_bollinger)")
@@ -580,6 +607,7 @@ class TradingApp(tk.Tk):
         slider_row("ADX 횡보 분기 기준",    bb["adx_range_thr"], 10,  30,  1,    "ADX<{:.0f}")
         slider_row("최대 보유 시간",        bb["max_hold_hours"], 12, 120, 6,    "{:.0f}h")
         self._param_vars["mr_bollinger"] = bb
+        reentry_row("mr_bollinger")
 
         # ── scalping_triple_ema ──
         section("▶  삼중EMA 스캘핑 (triple_ema)")
@@ -610,6 +638,7 @@ class TradingApp(tk.Tk):
         slider_row("ADX 횡보 한도 (<)", sbb["adx_limit"], 15, 40,  1,   "ADX<{:.0f}")
         slider_row("ATR 손절 배수",      sbb["atr_mult"],  0.5, 3.0, 0.1, "×{:.1f}")
         self._param_vars["scalping_bb_rsi"] = sbb
+        reentry_row("scalping_bb_rsi")
 
         # ── scalping_5ema_reversal ──
         section("▶  5EMA 반전 스캘핑 (5ema)")
@@ -629,6 +658,7 @@ class TradingApp(tk.Tk):
         slider_row("타임컷 시간 (분)",     e5["time_cut_min"],      5,   60,   5,   "{:.0f}분")
         slider_row("최소 수익률 기준 (%)", e5["min_momentum_pct"], 0.0, 2.0,  0.1, "{:.1f}%")
         self._param_vars["scalping_5ema_reversal"] = e5
+        reentry_row("scalping_5ema_reversal")
 
         # ── macd_rsi_trend ──
         section("▶  MACD+RSI 추세추종 (macd_rsi_trend)")
@@ -642,6 +672,7 @@ class TradingApp(tk.Tk):
         slider_row("RSI 손절 기준 (<)",  mrt["rsi_sl"],        35.0, 50.0, 0.5, "RSI<{:.1f}")
         slider_row("거래량 급증 배수",    mrt["vol_mult"],       1.0,  3.0,  0.1, "×{:.1f}")
         self._param_vars["macd_rsi_trend"] = mrt
+        reentry_row("macd_rsi_trend")
 
         # ── smrh_stop ──
         section("▶  SMRH 스탑매매 (smrh_stop)")
@@ -653,6 +684,7 @@ class TradingApp(tk.Tk):
         slider_row("RSI 최소 기준 (4h+30m)", smrh["rsi_min"],     45.0, 60.0,  0.5, "RSI≥{:.1f}")
         slider_row("MACD 시그널 기간",        smrh["macd_signal"], 9.0,  70.0,  1.0, "signal={:.0f}")
         self._param_vars["smrh_stop"] = smrh
+        reentry_row("smrh_stop")
 
         # 여백
         tk.Frame(inner, bg=C.BG2, height=12).pack()
@@ -803,6 +835,29 @@ class TradingApp(tk.Tk):
         tk.Button(parent, text="지금 요약 전송", font=("Arial", 9),
                   bg=C.BG3, fg=C.FG, relief="flat", bd=2, pady=4,
                   command=self._send_summary_now).pack(fill="x", padx=12, pady=4)
+
+        sep(); hdr("▶  Gemini AI 전략 분석")
+        gf = tk.Frame(parent, bg=C.BG2); gf.pack(fill="x", padx=12, pady=(4, 2))
+        tk.Label(gf, text="API Key:", font=("Arial", 8), fg=C.FG, bg=C.BG2,
+                 width=7, anchor="w").pack(side="left")
+        self._gemini_key_var = tk.StringVar(value=config.GEMINI_API_KEY or "")
+        tk.Entry(gf, textvariable=self._gemini_key_var, font=("Consolas", 8),
+                 bg=C.BG3, fg=C.FG, insertbackground=C.FG,
+                 show="*", relief="flat", bd=4,
+                 ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        self._gemini_btn = tk.Button(
+            parent, text="🔍  Gemini 전략 분석 실행",
+            font=("Arial", 9, "bold"),
+            bg=C.BG3, fg=C.ACCENT, relief="flat", bd=0, pady=5,
+            cursor="hand2", command=self._on_gemini_analyze,
+        )
+        self._gemini_btn.pack(fill="x", padx=12, pady=(2, 2))
+        tk.Label(parent,
+                 text="※ google-generativeai 설치 필요: pip install google-generativeai\n"
+                      "   https://aistudio.google.com/app/apikey 에서 무료 발급",
+                 font=("Arial", 7), fg=C.SUB, bg=C.BG2,
+                 justify="left").pack(anchor="w", padx=14, pady=(0, 4))
 
         sep()
         tk.Label(parent, text="※ plyer 설치 시 Windows 알림 지원\n   pip install plyer",
@@ -1478,6 +1533,146 @@ class TradingApp(tk.Tk):
 
         self._ticker_status.config(text=f"거래량 상위 {len(tickers)}개", fg=C.GREEN)
         self._update_ticker_sel_label()
+
+    # ─── Gemini 전략 분석 ─────────────────────────────────────────────────────
+
+    def _on_gemini_analyze(self) -> None:
+        """Gemini 분석 버튼 클릭 → 백그라운드 실행"""
+        api_key = self._gemini_key_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("Gemini API Key 없음",
+                                   "알림/기록 탭에서 Gemini API Key를 입력하세요.\n"
+                                   "https://aistudio.google.com/app/apikey (무료)")
+            return
+
+        self._gemini_btn.config(state="disabled", text="⏳ 분석 중...", fg=C.YELLOW)
+        scenario = config.SELECTED_SCENARIO
+        threading.Thread(
+            target=self._do_gemini_analyze,
+            args=(api_key, scenario),
+            daemon=True, name="GeminiAnalyze",
+        ).start()
+
+    def _do_gemini_analyze(self, api_key: str, scenario: str) -> None:
+        """백그라운드: Gemini API 호출 및 분석"""
+        try:
+            from core.gemini_analyzer import GeminiStrategyAnalyzer
+            analyzer = GeminiStrategyAnalyzer(api_key)
+            result = analyzer.analyze(
+                scenario_id=scenario,
+                max_trades=config.GEMINI_MAX_TRADES,
+            )
+            self.after(0, lambda r=result: self._show_gemini_result(r))
+        except ImportError:
+            self.after(0, lambda: self._gemini_error(
+                "google-generativeai 패키지가 없습니다.\n"
+                "터미널에서: pip install google-generativeai"
+            ))
+        except Exception as e:
+            self.after(0, lambda err=str(e): self._gemini_error(err))
+        finally:
+            self.after(0, lambda: self._gemini_btn.config(
+                state="normal", text="🔍  Gemini 전략 분석 실행", fg=C.ACCENT
+            ))
+
+    def _gemini_error(self, msg: str) -> None:
+        messagebox.showerror("Gemini 분석 실패", msg)
+
+    def _show_gemini_result(self, result: dict) -> None:
+        """Gemini 분석 결과 팝업 창 표시"""
+        import json as _json
+
+        win = tk.Toplevel(self)
+        win.title(f"Gemini 전략 분석 결과 — {result.get('scenario_id', '')}")
+        win.geometry("860x640")
+        win.minsize(700, 500)
+        win.configure(bg=C.BG)
+
+        # 헤더 정보
+        hf = tk.Frame(win, bg=C.BG2, padx=12, pady=8)
+        hf.pack(fill="x")
+        stats = (
+            f"시나리오: {result.get('scenario_id')}  │  "
+            f"거래 수: {result.get('trade_count')}건  │  "
+            f"승률: {result.get('win_rate')}%  │  "
+            f"평균수익: {result.get('avg_pnl_pct'):+.3f}%  │  "
+            f"최고: {result.get('best_pnl_pct'):+.2f}%  "
+            f"최저: {result.get('worst_pnl_pct'):+.2f}%"
+        )
+        tk.Label(hf, text=stats, font=("Arial", 9), fg=C.FG, bg=C.BG2).pack(anchor="w")
+        tk.Label(hf, text=f"분석 시각: {result.get('analysis_timestamp', '')[:19]}",
+                 font=("Arial", 8), fg=C.SUB, bg=C.BG2).pack(anchor="w")
+
+        # 탭
+        nb = ttk.Notebook(win); nb.pack(fill="both", expand=True, padx=8, pady=8)
+
+        def _tab_text(title: str, content: str, highlight_color: str = C.FG) -> None:
+            """스크롤 가능 텍스트 탭 추가"""
+            f = tk.Frame(nb, bg=C.BG); nb.add(f, text=f"  {title}  ")
+            txt = scrolledtext.ScrolledText(
+                f, font=("Consolas", 9), bg="#181825", fg=highlight_color,
+                insertbackground="white", relief="flat", bd=0, wrap="word",
+            )
+            txt.insert("1.0", content)
+            txt.config(state="disabled")
+            txt.pack(fill="both", expand=True, padx=4, pady=4)
+            return txt
+
+        # 탭 1: 문제점 & 개선안
+        issues_txt = "\n".join(f"⚠  {i}" for i in result.get("issues", []))
+        improv_txt = "\n".join(f"✅  {i}" for i in result.get("improvements", []))
+        summary_content = (
+            f"=== 발견된 문제점 ===\n{issues_txt or '없음'}\n\n"
+            f"=== 개선 제안 ===\n{improv_txt or '없음'}"
+        )
+        _tab_text("문제점 & 개선안", summary_content, C.YELLOW)
+
+        # 탭 2: Gemini 원문 분석
+        _tab_text("Gemini 원문", result.get("gemini_analysis", ""), C.FG)
+
+        # 탭 3: Claude 프롬프트 JSON (복사/저장 가능)
+        claude_json_str = _json.dumps(
+            result.get("claude_prompt_json", {}), ensure_ascii=False, indent=2
+        )
+        _tab_text("Claude 프롬프트 (JSON)", claude_json_str, C.ACCENT)
+
+        # 하단 버튼
+        bf = tk.Frame(win, bg=C.BG); bf.pack(fill="x", padx=8, pady=(0, 8))
+
+        def _copy_claude_json():
+            win.clipboard_clear()
+            win.clipboard_append(claude_json_str)
+            messagebox.showinfo("복사 완료",
+                                "Claude 프롬프트 JSON이 클립보드에 복사됐습니다.\n"
+                                "Claude Code 또는 claude.ai에 붙여넣기 하세요.",
+                                parent=win)
+
+        def _save_to_file():
+            import os, json as _j
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            ts = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d_%H%M%S")
+            fname = f"gemini_analysis_{result.get('scenario_id', 'unknown')}_{ts}.json"
+            save_path = os.path.join(config.LOGS_DIR, fname)
+            try:
+                with open(save_path, "w", encoding="utf-8") as f:
+                    _j.dump(result, f, ensure_ascii=False, indent=2)
+                messagebox.showinfo("저장 완료", f"저장됨: {save_path}", parent=win)
+            except Exception as e:
+                messagebox.showerror("저장 실패", str(e), parent=win)
+
+        tk.Button(bf, text="📋  Claude JSON 복사", font=("Arial", 9, "bold"),
+                  bg=C.ACCENT, fg=C.HEADER, relief="flat", bd=0, padx=12, pady=5,
+                  cursor="hand2", command=_copy_claude_json
+                  ).pack(side="left", padx=(0, 6))
+        tk.Button(bf, text="💾  분석 결과 저장 (JSON)", font=("Arial", 9),
+                  bg=C.BG3, fg=C.FG, relief="flat", bd=0, padx=12, pady=5,
+                  cursor="hand2", command=_save_to_file
+                  ).pack(side="left")
+        tk.Button(bf, text="닫기", font=("Arial", 9),
+                  bg=C.BG3, fg=C.FG, relief="flat", bd=0, padx=12, pady=5,
+                  cursor="hand2", command=win.destroy
+                  ).pack(side="right")
 
     # ─── GitHub 자동 업로드 ──────────────────────────────────────────────────
 

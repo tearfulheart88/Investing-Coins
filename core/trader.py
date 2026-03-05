@@ -297,6 +297,10 @@ class Trader:
                 # 1. 전략 고유 매도 신호
                 sell_signal = self.strategy.should_sell_on_signal(ticker, price, position)
                 if sell_signal.should_sell:
+                    # ── 재진입(Re-entry) 체크 ──────────────────────────────
+                    if self._should_reentry(sell_signal, position, price):
+                        self._execute_reentry(position, price, sell_signal.reason)
+                        return
                     self._execute_sell(position, price, reason=sell_signal.reason)
                     return
 
@@ -372,6 +376,59 @@ class Trader:
             return
         self._ticker_manager.n = n
         logger.info(f"[Trader] 상위 N 변경 → {self._ticker_manager.n}개 (다음 루프에서 갱신)")
+
+    # ─── 재진입 (Re-entry) ──────────────────────────────────────────────────
+
+    def _should_reentry(self, sell_signal, position, price: float) -> bool:
+        """
+        재진입 조건 판단.
+
+        조건:
+          1. 현재 시나리오가 REENTRY_ENABLED_SCENARIOS에 포함될 것
+          2. 매도 신호가 수익 구간에서 발생했을 것 (current_price > buy_price)
+          3. 손절(STOP_LOSS)은 재진입 제외
+        """
+        scenario = config.SELECTED_SCENARIO
+        if scenario not in config.REENTRY_ENABLED_SCENARIOS:
+            return False
+        if "STOP_LOSS" in sell_signal.reason:
+            return False
+        return price > position.buy_price
+
+    def _execute_reentry(
+        self,
+        position,
+        price: float,
+        original_reason: str,
+    ) -> None:
+        """
+        재진입 실행: 실제 매도 없이 기준가와 손절가만 갱신.
+
+        - buy_price      → current price (새 기준 매수가)
+        - stop_loss_price→ new_buy_price × (1 - STOP_LOSS_PCT)
+        - krw_spent      → 그대로 유지 (원래 투자금 추적)
+        """
+        new_stop = price * (1 - config.STOP_LOSS_PCT)
+        self.state.update_position_entry(position.ticker, price, new_stop)
+
+        logger.info(
+            f"[Re-entry] {position.ticker} | "
+            f"기존 매수가={position.buy_price:,.0f} → 신규={price:,.0f} | "
+            f"손절가={new_stop:,.0f} | 원인={original_reason}"
+        )
+
+        # 거래 로그: REENTRY 이벤트 기록
+        self.trade_logger.log_trade(TradeRecord(
+            ticker      = position.ticker,
+            action      = "REENTRY",
+            price       = price,
+            volume      = position.volume,
+            strategy_id = position.strategy_id,
+            scenario_id = position.scenario_id,
+            reason      = f"REENTRY({original_reason})",
+            order_uuid  = position.order_uuid,
+            stop_loss_price = new_stop,
+        ))
 
     # ─── 일일 매수 추적 ──────────────────────────────────────────────────────
 

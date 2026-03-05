@@ -117,6 +117,34 @@ class StateManager:
         with self._lock:
             return list(self._positions.values())
 
+    def update_position_entry(
+        self,
+        ticker: str,
+        new_buy_price: float,
+        new_stop_loss: float,
+    ) -> bool:
+        """
+        재진입(Re-entry): 포지션의 기준 매수가와 손절가를 갱신합니다.
+        수량·투자원금(krw_spent)은 그대로 유지됩니다.
+
+        Returns
+        -------
+        bool
+            포지션이 존재해 갱신에 성공하면 True, 없으면 False.
+        """
+        with self._lock:
+            pos = self._positions.get(ticker)
+            if pos is None:
+                return False
+            pos.buy_price       = new_buy_price
+            pos.stop_loss_price = new_stop_loss
+        self.save()
+        logger.info(
+            f"[StateManager] 재진입 갱신 | {ticker} | "
+            f"buy_price={new_buy_price:,.0f} | stop_loss={new_stop_loss:,.0f}"
+        )
+        return True
+
     # ─── Peak Equity ──────────────────────────────────────────────────────────
 
     @property
