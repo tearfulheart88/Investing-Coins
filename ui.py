@@ -95,6 +95,7 @@ class TradingApp(tk.Tk):
         self._paper_rows: list[PaperAccountRow] = []
         self._trade_log_wins: dict[str, tk.Toplevel] = {}  # 거래 로그 팝업 창 관리
         self._param_vars: dict[str, dict[str, tk.Variable]] = {}  # 전략 파라미터 슬라이더
+        self._git_uploading = False   # GitHub 업로드 진행 여부
 
         # 로그 큐
         self._log_queue: queue.Queue = queue.Queue(maxsize=2000)
@@ -189,7 +190,7 @@ class TradingApp(tk.Tk):
                  font=("Arial", 12, "bold"), fg=C.ACCENT,
                  bg=C.HEADER).pack(side="left", padx=10)
 
-        # 우측: 타이머 / 자산
+        # 우측: 타이머 / 자산 / GitHub 업로드
         self._timer_label = tk.Label(bar, text="⏱ —",
                                       font=("Consolas", 10), fg=C.YELLOW,
                                       bg=C.HEADER)
@@ -198,6 +199,23 @@ class TradingApp(tk.Tk):
                                        font=("Arial", 11, "bold"),
                                        fg=C.GREEN, bg=C.HEADER)
         self._equity_label.pack(side="right", padx=12)
+
+        # GitHub 자동 업로드 버튼
+        tk.Label(bar, text="│", fg=C.SUB, bg=C.HEADER).pack(side="right", padx=4)
+        self._git_btn = tk.Button(
+            bar, text="↑ GitHub",
+            font=("Arial", 9, "bold"),
+            bg=C.BG2, fg=C.ACCENT,
+            relief="flat", bd=0, padx=10, pady=3,
+            cursor="hand2",
+            command=self._on_git_upload,
+        )
+        self._git_btn.pack(side="right", padx=(4, 0))
+        self._git_status_label = tk.Label(
+            bar, text="",
+            font=("Arial", 8), fg=C.SUB, bg=C.HEADER,
+        )
+        self._git_status_label.pack(side="right", padx=(0, 2))
 
     # ─── 좌측 패널 ───────────────────────────────────────────────────────────
 
@@ -1460,6 +1478,91 @@ class TradingApp(tk.Tk):
 
         self._ticker_status.config(text=f"거래량 상위 {len(tickers)}개", fg=C.GREEN)
         self._update_ticker_sel_label()
+
+    # ─── GitHub 자동 업로드 ──────────────────────────────────────────────────
+
+    def _on_git_upload(self) -> None:
+        """GitHub 업로드 버튼 클릭 → 백그라운드 스레드에서 git add/commit/push 실행"""
+        if self._git_uploading:
+            return
+        self._git_uploading = True
+        self._git_btn.config(state="disabled", text="⏳ 업로드 중...", fg=C.YELLOW)
+        self._git_status_label.config(text="", fg=C.SUB)
+        threading.Thread(target=self._do_git_upload, daemon=True, name="GitUpload").start()
+
+    def _do_git_upload(self) -> None:
+        """백그라운드: git add → commit → push 순서로 실행"""
+        import subprocess, shutil
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        log = logging.getLogger(__name__)
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        git_exe = shutil.which("git") or "git"
+
+        def run(args: list[str]) -> tuple[int, str]:
+            result = subprocess.run(
+                [git_exe] + args,
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            return result.returncode, (result.stdout + result.stderr).strip()
+
+        try:
+            # 1) 변경 파일 확인 (logs/ 와 .env 제외)
+            rc, staged = run(["status", "--porcelain"])
+            lines = [
+                l for l in staged.splitlines()
+                if not l[3:].startswith("logs/")
+                and not l[3:].startswith(".env")
+            ]
+            if not lines:
+                log.info("[GitHub] 변경 사항 없음 — 업로드 스킵")
+                self.after(0, lambda: self._git_upload_done(True, "변경 없음"))
+                return
+
+            # 2) git add (logs, .env 제외)
+            run(["add", "-A"])
+            run(["reset", "--", "logs/", ".env", ".env.local"])
+
+            # staged 여부 재확인
+            rc, diff = run(["diff", "--cached", "--name-only"])
+            if not diff.strip():
+                log.info("[GitHub] 스테이징할 파일 없음")
+                self.after(0, lambda: self._git_upload_done(True, "변경 없음"))
+                return
+
+            # 3) commit
+            now_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M KST")
+            msg = f"[Auto] 프로그램 업데이트 - {now_kst}"
+            rc, out = run(["commit", "-m", msg])
+            if rc != 0 and "nothing to commit" not in out:
+                raise RuntimeError(f"commit 실패: {out}")
+
+            # 4) push
+            rc, out = run(["push", "origin", "main"])
+            if rc != 0:
+                raise RuntimeError(f"push 실패: {out}")
+
+            log.info(f"[GitHub] 업로드 완료: {msg}")
+            self.after(0, lambda: self._git_upload_done(True, "업로드 완료 ✓"))
+
+        except Exception as e:
+            log.error(f"[GitHub] 업로드 실패: {e}")
+            err_msg = str(e)[:60]
+            self.after(0, lambda m=err_msg: self._git_upload_done(False, m))
+
+    def _git_upload_done(self, success: bool, message: str) -> None:
+        """업로드 완료 후 버튼/레이블 상태 복원"""
+        self._git_uploading = False
+        self._git_btn.config(state="normal", text="↑ GitHub", fg=C.ACCENT)
+        color = C.GREEN if success else C.RED
+        self._git_status_label.config(text=message, fg=color)
+        # 5초 후 메시지 자동 제거
+        self.after(5000, lambda: self._git_status_label.config(text="", fg=C.SUB))
 
     # ─── 기타 ────────────────────────────────────────────────────────────────
 
