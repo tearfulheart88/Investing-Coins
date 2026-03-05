@@ -1,5 +1,8 @@
-# Claude Code local settings (not needed in repo)
-.claude/
+# Claude Code — 로컬 설정은 제외, Skills(commands/)는 포함
+# (*.claude/ 대신 .claude/* 사용: 상위 폴더 제외 시 하위 negation 불가)
+.claude/*
+!.claude/commands/
+!.claude/commands/*.md
 
 # Environment & Credentials
 .env

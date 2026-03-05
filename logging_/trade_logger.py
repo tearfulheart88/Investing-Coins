@@ -9,6 +9,13 @@ from zoneinfo import ZoneInfo
 from filelock import FileLock
 import config
 
+# SQLite 연동 (선택적 — import 실패해도 JSONL 모드로 계속 동작)
+try:
+    from logging_.trade_db import TradeDB as _TradeDB
+    _HAS_TRADE_DB = True
+except Exception:
+    _HAS_TRADE_DB = False
+
 logger = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
@@ -56,6 +63,14 @@ class TradeLogger:
         self._jsonl_lock = FileLock(self._jsonl_path + ".lock")
         self._session_id: str | None = None   # 현재 세션 ID
 
+        # SQLite DB (사용 가능하면 활성화)
+        self._db: "_TradeDB | None" = None
+        if _HAS_TRADE_DB:
+            try:
+                self._db = _TradeDB()
+            except Exception as exc:
+                logger.warning(f"[TradeLogger] SQLite 비활성화: {exc}")
+
     def set_session_id(self, session_id: str | None) -> None:
         """현재 세션 ID 설정. None이면 세션 태깅 비활성화."""
         self._session_id = session_id
@@ -68,6 +83,9 @@ class TradeLogger:
         self._append_jsonl(record)
         if record.action == "SELL":
             self._append_csv(record)
+        # SQLite 병렬 기록 (실패해도 JSONL에는 이미 기록됨)
+        if self._db is not None:
+            self._db.insert_trade(record)
 
         level = logging.WARNING if (
             record.action == "SELL" and record.pnl_pct is not None and record.pnl_pct < 0
