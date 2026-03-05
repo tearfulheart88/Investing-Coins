@@ -1,0 +1,78 @@
+# Claude Code local settings (not needed in repo)
+.claude/
+
+# Environment & Credentials
+.env
+.env.local
+.env.*.local
+secrets.json
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+.tox/
+*.venv
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Project-specific logs (session logs are local only)
+logs/
+*.log
+
+# State files (positions.json is local only)
+data/state/positions.json
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# OS
+.DS_Store
+Thumbs.db
+
+# UI artifacts
+*.pyc
+.ipynb_checkpoints/
+
+# PyUpbit cache (if any)
+.upbit_cache/
+
+# Windows shortcuts
+*.lnk

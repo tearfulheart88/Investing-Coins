@@ -1,0 +1,93 @@
+name: Auto-commit Code Changes
+
+# 코드 변경 시 자동으로 커밋 및 푸시
+# Automatically commit and push when code changes
+
+on:
+  # 1. 수동 트리거 (Actions 탭에서 실행)
+  workflow_dispatch:
+
+  # 2. 자동 트리거 (매시간 검사)
+  schedule:
+    - cron: '0 * * * *'  # 매시간 정각
+
+  # 3. 코드 푸시 시 (다른 브랜치에서 main으로 병합될 때)
+  push:
+    branches:
+      - main
+    paths:
+      - '**.py'          # Python 파일
+      - 'config.py'      # 설정 파일
+      - 'requirements.txt'  # 의존성
+      - '!logs/**'       # logs 폴더 제외
+      - '!*.log'         # .log 파일 제외
+
+permissions:
+  contents: write
+
+jobs:
+  auto-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 전체 히스토리 가져오기
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Check for changes (excluding logs)
+      id: check_changes
+      run: |
+        # 로그 제외하고 변경된 파일 확인
+        git status --porcelain | grep -v '^?? logs/' | grep -v '\.log$' > changes.txt || true
+        if [ -s changes.txt ]; then
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          cat changes.txt
+        else
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "No code changes detected"
+        fi
+
+    - name: Configure git
+      if: steps.check_changes.outputs.has_changes == 'true'
+      run: |
+        git config --local user.email "github-actions@github.com"
+        git config --local user.name "GitHub Actions"
+
+    - name: Commit and push changes
+      if: steps.check_changes.outputs.has_changes == 'true'
+      run: |
+        # 로그 파일 제외
+        git add -A ':!logs' ':!*.log'
+
+        # .env 파일 실수로 추가되지 않도록 최종 확인
+        git reset .env .env.local 2>/dev/null || true
+
+        # 변경 사항 확인
+        if git diff --cached --quiet; then
+          echo "No changes to commit after filtering"
+          exit 0
+        fi
+
+        # 커밋 메시지
+        COMMIT_MESSAGE="[Auto-commit] Program update - $(date '+%Y-%m-%d %H:%M:%S UTC')"
+        git commit -m "$COMMIT_MESSAGE"
+
+        # 푸시 (충돌 발생 시 재시도)
+        git push origin main || {
+          echo "Push failed, attempting to resolve..."
+          git pull --rebase origin main
+          git push origin main
+        }
+
+    - name: Log automation status
+      run: |
+        echo "Auto-commit workflow completed"
+        echo "Repository: ${{ github.repository }}"
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S UTC')"
