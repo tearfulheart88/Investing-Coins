@@ -29,9 +29,13 @@ class PaperScenario:
         market_data: MarketData,
         strategy_id: str,
         scenario_id: str,
+        tickers: list[str] | None = None,
+        budget_per_trade: int | None = None,
     ) -> None:
         self.account  = account
         self.strategy = load_strategy(market_data, strategy_id, scenario_id)
+        self.tickers  = tickers or list(config.TICKERS)
+        self.budget_per_trade = budget_per_trade or config.BUDGET_PER_TRADE
         self._daily_buy_tracker: dict[str, date] = {}
 
     def already_bought_today(self, ticker: str) -> bool:
@@ -76,7 +80,10 @@ class PaperEngine:
             target=self._run_loop, name="PaperEngine", daemon=True
         )
         self._thread.start()
-        logger.info(f"가상거래 엔진 시작 | 시나리오 {len(self._scenarios)}개 | 종목: {self._tickers}")
+        tickers_info = ", ".join(
+            f"{s.account.account_id}({len(s.tickers)}종목)" for s in self._scenarios
+        )
+        logger.info(f"가상거래 엔진 시작 | 시나리오 {len(self._scenarios)}개 | {tickers_info}")
 
         # 옵시디언 세션 시작 기록
         if self._obsidian:
@@ -94,9 +101,25 @@ class PaperEngine:
                 logger.warning(f"Obsidian 세션 시작 기록 실패: {e}")
 
     def stop(self) -> None:
-        if self._obsidian:
-            prices = self._price_cache.all_prices()
+        # ── 종료 전 전 포지션 강제 청산 ──
+        prices = self._price_cache.all_prices()
+        for scenario in self._scenarios:
+            account = scenario.account
+            for ticker in list(account.positions.keys()):
+                price = prices.get(ticker) or account.positions[ticker].buy_price
+                try:
+                    indicators = self._get_indicators(ticker, price)
+                except Exception:
+                    indicators = {}
+                trade = account.execute_sell(ticker, price, "STOP_LIQUIDATION", indicators)
+                if trade:
+                    logger.info(
+                        f"[{account.account_id}] 정지 청산 | "
+                        f"{ticker} | {price:,.0f}원 | PnL={trade.pnl:+,.0f}원"
+                    )
+                    self._log_obsidian(account.scenario_id, trade)
 
+        if self._obsidian:
             # ── 세션 종료 요약 ──
             try:
                 summaries = self.get_all_summaries()
@@ -160,7 +183,7 @@ class PaperEngine:
             for scenario in self._scenarios:
                 if self._stop_event.is_set():
                     break
-                for ticker in self._tickers:
+                for ticker in scenario.tickers:
                     try:
                         self._process(scenario, ticker)
                     except Exception as e:
@@ -284,7 +307,7 @@ class PaperEngine:
                     indicators.update(buy_signal.metadata)
                 trade = account.execute_buy(
                     ticker, price, buy_signal.reason,
-                    budget=config.BUDGET_PER_TRADE,
+                    budget=scenario.budget_per_trade,
                     indicators=indicators,
                 )
                 if trade:

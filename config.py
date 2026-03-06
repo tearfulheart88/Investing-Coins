@@ -69,6 +69,13 @@ SESSIONS_DIR: str = os.path.join(LOGS_DIR, "sessions")
 # ─── 가상거래 ─────────────────────────────────────────────────────────────────
 PAPER_TRADING: bool = False             # True = 가상거래, False = 실제거래
 
+# ─── 가상거래 시나리오 기본값 ──────────────────────────────────────────────────
+PAPER_TOTAL_BUDGET: int = 900_000              # 전체 가상거래 예산 (9시나리오 × 100,000)
+PAPER_DEFAULT_BALANCE: int = 100_000           # 시나리오별 기본 초기자금 (KRW)
+PAPER_DEFAULT_BUDGET_PER_TRADE: int = 30_000   # 시나리오별 기본 1회 거래액 (KRW)
+PAPER_DEFAULT_TICKER_COUNT: int = 10           # 시나리오별 기본 종목 수
+PAPER_TICKER_COUNT_OPTIONS: list = [3, 5, 10, 30, 50, 100]
+
 # ─── 옵시디언 ─────────────────────────────────────────────────────────────────
 OBSIDIAN_VAULT_PATH: str = ""           # 볼트 경로 (비어있으면 비활성화)
 OBSIDIAN_FOLDER: str = "자동매매"        # 볼트 내 하위 폴더

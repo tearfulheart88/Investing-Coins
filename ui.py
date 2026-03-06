@@ -65,11 +65,14 @@ C = type("C", (), {
 class PaperAccountRow:
     """UI에서 가상계좌 하나를 나타내는 데이터 클래스"""
     def __init__(self, account_id: str | None = None) -> None:
-        self.account_id   = account_id or f"ACC-{uuid.uuid4().hex[:6].upper()}"
-        self.name_var     = tk.StringVar(value=self.account_id)
-        self.strategy_var = tk.StringVar(value=STRATEGY_KEYS[0])
-        self.balance_var  = tk.StringVar(value="1,000,000")
-        # tickers_var 제거됨: 거래 설정 탭에서 선택한 종목 전체를 자동 사용
+        self.account_id           = account_id or f"ACC-{uuid.uuid4().hex[:6].upper()}"
+        self.name_var             = tk.StringVar(value=self.account_id)
+        self.strategy_var         = tk.StringVar(value=STRATEGY_KEYS[0])
+        self.balance_var          = tk.StringVar(value=f"{config.PAPER_DEFAULT_BALANCE:,}")
+        self.weight_var           = tk.StringVar(value="")           # 가중치% (자동계산)
+        self.ticker_count_var     = tk.StringVar(value=str(config.PAPER_DEFAULT_TICKER_COUNT))
+        self.budget_per_trade_var = tk.StringVar(value=f"{config.PAPER_DEFAULT_BUDGET_PER_TRADE:,}")
+        self._frame: tk.Frame | None = None
 
 
 # ─── 메인 앱 ─────────────────────────────────────────────────────────────────
@@ -118,7 +121,7 @@ class TradingApp(tk.Tk):
             "%(asctime)s [%(levelname)-8s] %(name)-20s | %(message)s",
             datefmt="%H:%M:%S",
         ))
-        h.setLevel(logging.DEBUG)
+        h.setLevel(logging.INFO)
         logging.getLogger().addHandler(h)
 
     # ─── TTK 스타일 ──────────────────────────────────────────────────────────
@@ -151,7 +154,7 @@ class TradingApp(tk.Tk):
         main = tk.Frame(self, bg=C.BG)
         main.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
-        left = tk.Frame(main, bg=C.BG2, width=340)
+        left = tk.Frame(main, bg=C.BG2, width=380)
         left.pack(side="left", fill="y", padx=(0, 6))
         left.pack_propagate(False)
         self._build_left_panel(left)
@@ -414,20 +417,50 @@ class TradingApp(tk.Tk):
         self._ticker_scroll_fn = _scroll_ticker
 
     def _build_paper_tab(self, parent: tk.Frame) -> None:
-        tk.Label(parent, text="각 행 = 독립 가상 계좌 (동시 실행)",
-                 font=("Arial", 8), fg=C.SUB, bg=C.BG2).pack(anchor="w", padx=10, pady=(8, 2))
+        # ── 상단: 전체 예산 입력 + 균등 배분 ──
+        hdr = tk.Frame(parent, bg=C.BG2)
+        hdr.pack(fill="x", padx=8, pady=(8, 2))
+        tk.Label(hdr, text="전체 예산(원):", font=("Arial", 9, "bold"),
+                 fg=C.ACCENT, bg=C.BG2).pack(side="left")
+        self._paper_total_budget_var = tk.StringVar(
+            value=f"{config.PAPER_TOTAL_BUDGET:,}")
+        tk.Entry(hdr, textvariable=self._paper_total_budget_var, width=12,
+                 font=("Consolas", 9), bg=C.BG3, fg=C.FG,
+                 insertbackground=C.FG, relief="flat", bd=3).pack(side="left", padx=4)
+        tk.Button(hdr, text="균등 배분", font=("Arial", 8, "bold"),
+                  bg=C.ACCENT, fg=C.HEADER, relief="flat", bd=0, padx=6, pady=2,
+                  cursor="hand2", command=self._distribute_paper_budget_equally
+                  ).pack(side="left", padx=4)
 
-        self._paper_list_frame = tk.Frame(parent, bg=C.BG2)
-        self._paper_list_frame.pack(fill="both", expand=True, padx=8)
+        self._paper_budget_info_label = tk.Label(
+            parent, text="", font=("Arial", 8), fg=C.SUB, bg=C.BG2)
+        self._paper_budget_info_label.pack(anchor="w", padx=12, pady=(0, 2))
 
-        tk.Label(parent, text="※ 종목: 거래 설정 탭에서 선택한 종목 전체 자동 사용",
-                 font=("Arial", 8), fg=C.PEACH, bg=C.BG2).pack(anchor="w", padx=10, pady=(0, 4))
+        # ── 중간: 스크롤 가능 카드 영역 ──
+        wrap = tk.Frame(parent, bg=C.BG3, bd=1, relief="flat")
+        wrap.pack(fill="both", expand=True, padx=8, pady=(0, 4))
 
-        hf = tk.Frame(self._paper_list_frame, bg=C.BG3)
-        hf.pack(fill="x", pady=(0, 2))
-        for col, w in [("계좌명", 80), ("전략", 170), ("초기자금", 90)]:
-            tk.Label(hf, text=col, font=("Arial", 8, "bold"), fg=C.ACCENT,
-                     bg=C.BG3, width=w//7, anchor="w").pack(side="left", padx=4)
+        self._paper_canvas = tk.Canvas(wrap, bg=C.BG2, highlightthickness=0)
+        p_scroll = ttk.Scrollbar(wrap, orient="vertical",
+                                  command=self._paper_canvas.yview)
+        self._paper_inner = tk.Frame(self._paper_canvas, bg=C.BG2)
+        self._paper_inner.bind(
+            "<Configure>",
+            lambda e: self._paper_canvas.configure(
+                scrollregion=self._paper_canvas.bbox("all")
+            ),
+        )
+        self._paper_canvas.create_window((0, 0), window=self._paper_inner, anchor="nw")
+        self._paper_canvas.configure(yscrollcommand=p_scroll.set)
+        self._paper_canvas.pack(side="left", fill="both", expand=True)
+        p_scroll.pack(side="right", fill="y")
+
+        _scroll_paper = lambda e: self._paper_canvas.yview_scroll(
+            -1 * (e.delta // 120), "units"
+        )
+        self._paper_canvas.bind("<MouseWheel>", _scroll_paper)
+        self._paper_inner.bind("<MouseWheel>", _scroll_paper)
+        self._paper_scroll_fn = _scroll_paper
 
         # 전략 개수만큼 가상계좌 자동 생성 (각 전략 1개씩)
         for i, key in enumerate(STRATEGY_KEYS):
@@ -437,7 +470,9 @@ class TradingApp(tk.Tk):
             self._paper_rows.append(row)
             self._render_paper_row(row)
 
-        bf = tk.Frame(parent, bg=C.BG2); bf.pack(fill="x", padx=10, pady=6)
+        # ── 하단: 추가/삭제 버튼 ──
+        bf = tk.Frame(parent, bg=C.BG2)
+        bf.pack(fill="x", padx=8, pady=(0, 6))
         tk.Button(bf, text="+ 계좌 추가", font=("Arial", 9),
                   bg=C.ACCENT, fg=C.HEADER, relief="flat", bd=0, padx=8, pady=4,
                   cursor="hand2", command=self._add_paper_row
@@ -447,33 +482,81 @@ class TradingApp(tk.Tk):
                   cursor="hand2", command=self._remove_paper_row
                   ).pack(side="left")
 
+        # 초기 균등 배분
+        self._distribute_paper_budget_equally()
+
     def _render_paper_row(self, row: PaperAccountRow) -> None:
-        f = tk.Frame(self._paper_list_frame, bg=C.BG2)
-        f.pack(fill="x", pady=2)
-        row._frame = f
+        """카드형 2줄 레이아웃으로 시나리오 표시"""
+        card = tk.Frame(self._paper_inner, bg=C.BG3, bd=1, relief="flat")
+        card.pack(fill="x", padx=4, pady=3, ipady=2)
+        row._frame = card
 
-        tk.Entry(f, textvariable=row.name_var, width=10,
-                 font=("Consolas", 8), bg=C.BG3, fg=C.FG,
-                 insertbackground=C.FG, relief="flat", bd=3).pack(side="left", padx=2)
+        # 마우스휠 전달
+        if hasattr(self, "_paper_scroll_fn"):
+            card.bind("<MouseWheel>", self._paper_scroll_fn)
 
-        ttk.Combobox(f, textvariable=row.strategy_var,
+        # ── 1줄: 계좌명 + 전략 ──
+        line1 = tk.Frame(card, bg=C.BG3)
+        line1.pack(fill="x", padx=6, pady=(3, 1))
+        tk.Label(line1, textvariable=row.name_var, font=("Consolas", 9, "bold"),
+                 fg=C.ACCENT, bg=C.BG3, width=8, anchor="w").pack(side="left")
+        ttk.Combobox(line1, textvariable=row.strategy_var,
                      values=STRATEGY_KEYS, state="readonly",
-                     font=("Consolas", 7), width=16).pack(side="left", padx=2)
+                     font=("Consolas", 7), width=22).pack(side="left", padx=4)
 
-        tk.Entry(f, textvariable=row.balance_var, width=11,
-                 font=("Consolas", 8), bg=C.BG3, fg=C.FG,
-                 insertbackground=C.FG, relief="flat", bd=3).pack(side="left", padx=2)
+        # ── 2줄: 자금 + 가중치 + 종목수 + 거래예산 ──
+        line2 = tk.Frame(card, bg=C.BG3)
+        line2.pack(fill="x", padx=6, pady=(1, 3))
+
+        tk.Label(line2, textvariable=row.balance_var, font=("Consolas", 8),
+                 fg=C.GREEN, bg=C.BG3, width=9, anchor="e").pack(side="left")
+        tk.Label(line2, textvariable=row.weight_var, font=("Arial", 8),
+                 fg=C.YELLOW, bg=C.BG3, width=7).pack(side="left", padx=(2, 4))
+
+        tk.Label(line2, text="종목", font=("Arial", 8), fg=C.SUB,
+                 bg=C.BG3).pack(side="left")
+        ttk.Combobox(line2, textvariable=row.ticker_count_var,
+                     values=[str(x) for x in config.PAPER_TICKER_COUNT_OPTIONS],
+                     state="readonly", font=("Consolas", 8), width=4
+                     ).pack(side="left", padx=2)
+
+        tk.Label(line2, text="1회", font=("Arial", 8), fg=C.SUB,
+                 bg=C.BG3).pack(side="left", padx=(4, 0))
+        tk.Entry(line2, textvariable=row.budget_per_trade_var, width=7,
+                 font=("Consolas", 8), bg=C.BG2, fg=C.FG,
+                 insertbackground=C.FG, relief="flat", bd=2).pack(side="left", padx=2)
+
+    def _distribute_paper_budget_equally(self) -> None:
+        """전체 예산을 시나리오별 균등 배분"""
+        try:
+            total = int(self._paper_total_budget_var.get().replace(",", ""))
+        except (ValueError, AttributeError):
+            total = config.PAPER_TOTAL_BUDGET
+        n = len(self._paper_rows)
+        if n == 0:
+            return
+        per = total // n
+        wt = 100.0 / n
+        for row in self._paper_rows:
+            row.weight_var.set(f"({wt:.1f}%)")
+            row.balance_var.set(f"{per:,}")
+        if hasattr(self, "_paper_budget_info_label"):
+            self._paper_budget_info_label.config(
+                text=f"{n}개 시나리오 | 각 {per:,}원 ({wt:.1f}%)")
 
     def _add_paper_row(self) -> None:
         row = PaperAccountRow()
+        row.name_var.set(f"ACC-{len(self._paper_rows)+1:02d}")
         self._paper_rows.append(row)
         self._render_paper_row(row)
+        self._distribute_paper_budget_equally()
 
     def _remove_paper_row(self) -> None:
         if len(self._paper_rows) > 1:
             row = self._paper_rows.pop()
-            if hasattr(row, "_frame"):
+            if row._frame:
                 row._frame.destroy()
+            self._distribute_paper_budget_equally()
 
     def _build_params_tab(self, parent: tk.Frame) -> None:
         """전략별 핵심 파라미터 슬라이더 탭."""
@@ -884,9 +967,24 @@ class TradingApp(tk.Tk):
         self._log_text.tag_config("ERROR",    foreground=C.RED)
         self._log_text.tag_config("CRITICAL", foreground="#ff5555",
                                    font=("Consolas", 9, "bold"))
-        tk.Button(lf, text="지우기", font=("Arial", 8), bg=C.BG3, fg=C.FG,
+
+        # 로그 필터 버튼 바
+        log_bf = tk.Frame(lf, bg=C.BG)
+        log_bf.pack(fill="x", padx=2, pady=2)
+        self._log_filter_level = tk.StringVar(value="ALL")
+        for lvl, txt, clr in [("ALL", "전체", C.FG),
+                                ("WARNING", "⚠ WARN+", C.YELLOW),
+                                ("ERROR", "❌ ERROR", C.RED)]:
+            tk.Radiobutton(
+                log_bf, text=txt, variable=self._log_filter_level, value=lvl,
+                font=("Arial", 8, "bold"), fg=clr, bg=C.BG,
+                selectcolor=C.BG3, activebackground=C.BG, activeforeground=clr,
+                indicatoron=False, padx=8, pady=2, relief="flat", bd=1,
+                command=self._apply_log_filter,
+            ).pack(side="left", padx=2)
+        tk.Button(log_bf, text="지우기", font=("Arial", 8), bg=C.BG3, fg=C.FG,
                   relief="flat", bd=2, command=self._clear_log
-                  ).pack(side="right", padx=4, pady=2)
+                  ).pack(side="right", padx=4)
 
         # 실제 포지션 탭
         pf = tk.Frame(nb, bg=C.BG); nb.add(pf, text="  실제 포지션  ")
@@ -903,13 +1001,14 @@ class TradingApp(tk.Tk):
         # 가상계좌 현황 탭
         vf = tk.Frame(nb, bg=C.BG); nb.add(vf, text="  가상계좌 현황  ")
         self._paper_tree = self._make_tree(vf, [
-            ("account",   "계좌명",   100),
-            ("scenario",  "전략",     150),
-            ("equity",    "현재평가", 120),
-            ("pnl",       "손익",     100),
-            ("pnl_pct",   "수익률",    80),
-            ("trades",    "거래수",    70),
-            ("win_rate",  "승률",      70),
+            ("account",    "계좌명",    90),
+            ("scenario",   "전략",     140),
+            ("ticker_cnt", "종목수",    55),
+            ("equity",     "현재평가", 110),
+            ("pnl",        "손익",      95),
+            ("pnl_pct",    "수익률",    75),
+            ("trades",     "거래수",    60),
+            ("win_rate",   "승률",      60),
         ])
         self._paper_tree.bind("<ButtonRelease-1>", self._on_paper_account_click)
         tk.Label(vf, text="* 3초 갱신  │  계좌 행 클릭 → 거래 로그", font=("Arial", 8),
@@ -1044,12 +1143,13 @@ class TradingApp(tk.Tk):
     def _on_start_paper_btn(self) -> None:
         if self._paper_running:
             return
-        if not self._collect_settings():
-            return
         if not self._paper_rows:
             messagebox.showwarning("경고", "가상계좌 탭에서 계좌를 추가하세요.")
             return
 
+        # 손절/낙폭만 config에 반영 (종목은 시나리오별 독립)
+        config.STOP_LOSS_PCT    = self._stoploss_var.get() / 100
+        config.MAX_DRAWDOWN_PCT = self._drawdown_var.get() / 100
         self._apply_strategy_params()
         self._init_obsidian_notif()
         self._paper_running = True
@@ -1138,31 +1238,55 @@ class TradingApp(tk.Tk):
         from core.paper_account import PaperAccount
         from core.paper_engine import PaperEngine, PaperScenario
         from data.market_data import MarketData
-        from exchange.websocket_manager import WebSocketManager, PriceCache   # ← 직접 import
+        from exchange.websocket_manager import WebSocketManager, PriceCache
 
         market_data = MarketData()
         price_cache = PriceCache()
 
-        # 거래 설정 탭에서 선택한 종목 전체를 모든 가상계좌에 공통 적용
-        all_tickers: set[str] = set(config.TICKERS)
+        # 종목 수별 캐시 (동일 N은 1회만 API 호출)
+        _ticker_cache: dict[int, list[str]] = {}
+        def _get_top(n: int) -> list[str]:
+            if n not in _ticker_cache:
+                _ticker_cache[n] = MarketData.get_top_tickers_by_volume(n)
+            return _ticker_cache[n]
+
+        all_tickers: set[str] = set()
         scenarios: list[PaperScenario] = []
 
         for row in self._paper_rows:
             try:
                 balance = float(row.balance_var.get().replace(",", ""))
             except ValueError:
-                balance = 1_000_000.0
+                balance = float(config.PAPER_DEFAULT_BALANCE)
+
+            try:
+                ticker_count = int(row.ticker_count_var.get())
+            except ValueError:
+                ticker_count = config.PAPER_DEFAULT_TICKER_COUNT
+
+            try:
+                budget_pt = int(row.budget_per_trade_var.get().replace(",", ""))
+            except ValueError:
+                budget_pt = config.PAPER_DEFAULT_BUDGET_PER_TRADE
 
             strat_key = row.strategy_var.get()
             strat_id, scen_id = STRATEGIES.get(
                 strat_key, (config.SELECTED_STRATEGY, config.SELECTED_SCENARIO)
             )
+
+            scenario_tickers = _get_top(ticker_count)
+            all_tickers.update(scenario_tickers)
+
             account = PaperAccount(
                 account_id=row.name_var.get() or row.account_id,
                 scenario_id=scen_id,
                 initial_balance=balance,
             )
-            scenario = PaperScenario(account, market_data, strat_id, scen_id)
+            scenario = PaperScenario(
+                account, market_data, strat_id, scen_id,
+                tickers=scenario_tickers,
+                budget_per_trade=budget_pt,
+            )
             scenarios.append(scenario)
 
         ws = WebSocketManager(list(all_tickers), price_cache)
@@ -1184,7 +1308,7 @@ class TradingApp(tk.Tk):
 
         engine.start()
         logging.getLogger(__name__).info(
-            f"가상거래 시작 | {len(scenarios)}개 계좌 | 종목: {list(all_tickers)}"
+            f"가상거래 시작 | {len(scenarios)}개 계좌 | 전체 종목: {len(all_tickers)}개"
         )
 
     def _get_paper_summaries(self) -> list[dict]:
@@ -1246,9 +1370,16 @@ class TradingApp(tk.Tk):
             self._paper_tree.delete(row)
         for s in summaries:
             tag = "profit" if s["total_pnl"] >= 0 else "loss"
+            # 시나리오의 종목 수 조회
+            ticker_cnt = "—"
+            if self._paper_engine:
+                sc = self._paper_engine.get_scenario(s["account_id"])
+                if sc:
+                    ticker_cnt = str(len(sc.tickers))
             self._paper_tree.insert("", "end", tags=(tag,), values=(
                 s["account_id"],
                 s["scenario_id"],
+                ticker_cnt,
                 f"{s['current_equity']:,.0f}",
                 f"{s['total_pnl']:+,.0f}",
                 f"{s['total_pnl_pct']:+.2f}%",
@@ -1464,6 +1595,16 @@ class TradingApp(tk.Tk):
         self._log_text.config(state="normal")
         self._log_text.delete("1.0", "end")
         self._log_text.config(state="disabled")
+
+    def _apply_log_filter(self) -> None:
+        """로그 필터 레벨 변경 (QueueHandler 레벨 동적 조정)"""
+        lvl = self._log_filter_level.get()
+        level_map = {"ALL": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}
+        target_level = level_map.get(lvl, logging.INFO)
+        for h in logging.getLogger().handlers:
+            if isinstance(h, _QueueHandler):
+                h.setLevel(target_level)
+                break
 
     # ─── 종목 선택 헬퍼 ──────────────────────────────────────────────────────
 
