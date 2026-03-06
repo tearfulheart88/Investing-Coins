@@ -57,7 +57,9 @@ class VBNoiseFilterStrategy(BaseStrategy):
 
     def __init__(self, market_data: MarketData) -> None:
         self._md = market_data
-        self._peaks: dict[str, float] = {}  # v3: ticker → 최고가 (본절방어 + 트레일링)
+        self._peaks: dict[str, float] = {}        # v3: ticker → 최고가 (본절방어 + 트레일링)
+        # [개선] 타임컷 1회 연장 사용 여부 추적 (모멘텀 유지 시 1회만 바이패스 허용)
+        self._time_cut_extended: set[str] = set() # ticker → 이미 연장 사용함
 
     def get_strategy_id(self) -> str:
         return "volatility_breakout"
@@ -75,6 +77,8 @@ class VBNoiseFilterStrategy(BaseStrategy):
             target_price     = self._md.compute_target_price(ticker, k)
             ma               = self._md.compute_ma(ticker, period=config.MA_PERIOD)
             vol_cur, vol_sma = self._md.compute_volume_sma_intraday(ticker, _VOL_SMA_PERIOD, "minute5")
+            # [개선] 당일 고가 이격도 필터용: 일봉 OHLCV (최근 3봉, 마지막이 당일)
+            df_daily         = self._md.get_ohlcv(ticker, count=3)
         except DataFetchError as e:
             logger.warning(f"[vb_noise_filter] 데이터 조회 실패, 매수 건너뜀 | {ticker}: {e}")
             return BuySignal(
@@ -101,6 +105,25 @@ class VBNoiseFilterStrategy(BaseStrategy):
         else:
             reason = "NO_BREAKOUT"
             should = False
+
+        # ── [개선] 고점 이격도 필터: 당일 고가 아래 1% 이내에서의 돌파는 패스 ──
+        # 당일 고가 바로 아래에서 돌파 진입 시 윗꼬리 저항 맞을 확률이 높음.
+        # 단, 이미 당일 고가를 갱신(신고가) 중인 경우는 적용하지 않음 (진짜 돌파).
+        if should and not df_daily.empty:
+            try:
+                today_high = float(df_daily.iloc[-1]["high"])
+                # 현재가가 오늘 고가를 갱신하지 못했을 때만 필터 적용
+                if today_high > 0 and current_price < today_high:
+                    proximity_pct = (today_high - current_price) / today_high * 100
+                    if proximity_pct < 1.0:
+                        # 고가 아래 1% 이내 → 윗꼬리 저항 위험 → 매수 패스
+                        should = False
+                        reason = (
+                            f"HIGH_PROXIMITY({proximity_pct:.2f}%<1%"
+                            f"|high={today_high:,.0f})"
+                        )
+            except Exception as e:
+                logger.debug(f"[vb_noise_filter] 고점 이격도 계산 오류: {e}")
 
         logger.debug(
             f"[vb_noise_filter] {ticker} | price={current_price:,.0f} "
@@ -146,6 +169,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 )
                 logger.info(f"[vb_noise_filter] ★ 트레일링 청산 | {ticker} | pnl={pnl_pct:+.2f}% | {reason}")
                 self._peaks.pop(ticker, None)
+                self._time_cut_extended.discard(ticker)  # [개선] 포지션 종료 시 연장 기록 초기화
                 return SellSignal(ticker, True, current_price, reason)
 
         # ── 본절 방어: peak PnL ≥ BE_TRIGGER이면 SL을 진입가+BE_FLOOR로 ──
@@ -158,6 +182,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 )
                 logger.info(f"[vb_noise_filter] ★ 본절방어 청산 | {ticker} | {reason}")
                 self._peaks.pop(ticker, None)
+                self._time_cut_extended.discard(ticker)  # [개선] 포지션 종료 시 연장 기록 초기화
                 return SellSignal(ticker, True, current_price, reason)
 
         # ── Time-cut: 일정 시간 경과 후 모멘텀 부재 시 청산 ────────────────
@@ -171,15 +196,57 @@ class VBNoiseFilterStrategy(BaseStrategy):
 
             if elapsed_hours >= _TIME_CUT_HOURS:
                 if pnl_pct < _MIN_MOMENTUM_PCT:
-                    reason = (
-                        f"TIME_CUT({elapsed_hours:.1f}h"
-                        f"|pnl={pnl_pct:+.2f}%<{_MIN_MOMENTUM_PCT}%)"
-                    )
-                    logger.info(
-                        f"[vb_noise_filter] ⏱ 타임컷 청산 | {ticker} | {reason}"
-                    )
-                    self._peaks.pop(ticker, None)
-                    return SellSignal(ticker, True, current_price, reason)
+                    # ── [개선] 모멘텀 유지 시 타임컷 1회 연장 ──────────────────
+                    # 수익률이 마이너스여도 1시간봉 MACD 양봉 + RSI≥50 이면
+                    # 추세가 살아있다고 판단 → 타임컷을 딱 1회 바이패스(연장)
+                    # 이미 1회 연장 사용한 경우에는 무조건 청산 (무한 연장 방지)
+                    if ticker not in self._time_cut_extended:
+                        # 아직 연장 미사용 → 모멘텀 지표 확인
+                        try:
+                            macd_1h = self._md.compute_macd(ticker, 12, 26, 9, "minute60")
+                            rsi_1h  = self._md.compute_rsi_intraday(ticker, 14, "minute60")
+                            # 1시간봉 기준 MACD 히스토그램 양수 AND RSI ≥ 50
+                            momentum_alive = macd_1h["hist"] > 0 and rsi_1h >= 50
+                        except Exception as e:
+                            logger.debug(f"[vb_noise_filter] 모멘텀 지표 조회 오류: {e}")
+                            momentum_alive = False
+
+                        if momentum_alive:
+                            # 모멘텀 유지 중 → 타임컷 1회 연장, 보유 유지
+                            self._time_cut_extended.add(ticker)
+                            logger.info(
+                                f"[vb_noise_filter] ⏱ 타임컷 연장 | {ticker} | "
+                                f"pnl={pnl_pct:+.2f}% elapsed={elapsed_hours:.1f}h | "
+                                f"MACD_1H={macd_1h['hist']:.4f} RSI_1H={rsi_1h:.1f} "
+                                f"→ 모멘텀 유지 중, 1회 바이패스 허용"
+                            )
+                            # 이번 사이클 청산하지 않고 통과
+                        else:
+                            # 모멘텀 소진 → 즉시 타임컷 청산
+                            reason = (
+                                f"TIME_CUT({elapsed_hours:.1f}h"
+                                f"|pnl={pnl_pct:+.2f}%<{_MIN_MOMENTUM_PCT}%"
+                                f"|모멘텀소진)"
+                            )
+                            logger.info(
+                                f"[vb_noise_filter] ⏱ 타임컷 청산 | {ticker} | {reason}"
+                            )
+                            self._peaks.pop(ticker, None)
+                            self._time_cut_extended.discard(ticker)
+                            return SellSignal(ticker, True, current_price, reason)
+                    else:
+                        # 이미 1회 연장 사용함 → 무조건 최종 타임컷 청산 (무한 연장 방지)
+                        reason = (
+                            f"TIME_CUT_FINAL({elapsed_hours:.1f}h"
+                            f"|pnl={pnl_pct:+.2f}%<{_MIN_MOMENTUM_PCT}%"
+                            f"|연장소진)"
+                        )
+                        logger.info(
+                            f"[vb_noise_filter] ⏱ 타임컷 최종청산(연장 소진) | {ticker} | {reason}"
+                        )
+                        self._peaks.pop(ticker, None)
+                        self._time_cut_extended.discard(ticker)
+                        return SellSignal(ticker, True, current_price, reason)
         except Exception as e:
             logger.debug(f"[vb_noise_filter] time-cut 계산 오류: {e}")
 

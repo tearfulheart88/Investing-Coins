@@ -36,6 +36,7 @@ EMA 주기: EMA(10) / EMA(20) / EMA(50)
 
 타임프레임: 5분봉 (진입) + 1시간봉 (HTF 필터)
 """
+import time
 import logging
 from data.market_data import MarketData
 from exchange.upbit_client import DataFetchError
@@ -50,17 +51,23 @@ _HTF_EMA      = 200           # HTF EMA 기간 (상위 추세 필터)
 _TP_PCT          = 0.02       # v3: 0.6% → 2.0% (5분봉 스윙 스케일)
 _SL_PCT          = 0.015      # v3: 0.3% → 1.5% (5분봉 정상 변동 수용)
 _TRAIL_MIN_PCT   = 0.015      # 트레일링 최소 폭 1.5%
-_ADX_MIN         = 20.0       # ADX 최소 추세 강도
-_EMA_SPREAD_MIN  = 0.3        # EMA10-EMA50 이격도 최소 기준 (%)
+_ADX_MIN         = 25.0       # [개선] 20.0 → 25.0 (강력한 추세에서만 진입, 횡보장 필터 강화)
+_EMA_SPREAD_MIN  = 0.5        # [개선] 0.3% → 0.5% (확실한 정배열 이격 확보, 휩쏘 방지)
 _PANIC_BODY_MULT = 2.5        # v3: 대형 음봉 판단 배수 (body > ATR(20) × 이 값)
 _ATR_PERIOD      = 20         # ATR 기간 (대형 음봉 필터용)
+
+# ── [개선] 연속 손절 방지 쿨타임 파라미터 ───────────────────────────────────
+# 최근 15분 이내 매수 이력이 있는 티커는 재진입 금지하여 연속 손절 차단
+_COOLTIME_SEC    = 15 * 60    # 쿨타임 지속 시간 (900초 = 15분)
 
 
 class TripleEMAStrategy(BaseStrategy):
 
     def __init__(self, market_data: MarketData) -> None:
         self._md    = market_data
-        self._peaks: dict[str, float] = {}   # ticker → 포지션 진입 후 최고가
+        self._peaks: dict[str, float] = {}          # ticker → 포지션 진입 후 최고가
+        # [개선] 쿨타임 추적: 마지막 매수 시각(단조 시간, time.monotonic())
+        self._last_buy_times: dict[str, float] = {} # ticker → 마지막 매수 시각
 
     def get_strategy_id(self) -> str:
         return "scalping"
@@ -100,6 +107,20 @@ class TripleEMAStrategy(BaseStrategy):
             "ema10": round(ema10, 0), "ema20": round(ema20, 0), "ema50": round(ema50, 0),
             f"ema{_HTF_EMA}_1h": round(ema_htf, 0), "adx_5m": round(adx, 1),
         }
+
+        # ── [개선] 쿨타임 필터: 최근 15분 이내 매수 이력 있는 종목 진입 금지 ──
+        # 연속 손절 방지: 같은 종목에서 짧은 간격으로 반복 진입하는 것을 차단
+        # 한 번 손절된 종목은 시장 컨디션이 바뀔 시간을 주고 재진입 허용
+        now_mono = time.monotonic()
+        last_buy_t = self._last_buy_times.get(ticker, 0.0)
+        elapsed_since_last_buy = now_mono - last_buy_t
+        if elapsed_since_last_buy < _COOLTIME_SEC:
+            remaining = int(_COOLTIME_SEC - elapsed_since_last_buy)
+            return BuySignal(
+                ticker, False, current_price,
+                f"COOLTIME({remaining}s 남음 / {_COOLTIME_SEC}s)",
+                metadata=meta,
+            )
 
         # ── 필터 1: HTF 추세 (현재가 > EMA200 1시간봉) ─────────────────────
         if current_price <= ema_htf:
@@ -158,10 +179,13 @@ class TripleEMAStrategy(BaseStrategy):
             return BuySignal(ticker, False, current_price, "NOT_RECLAIMED_YET", metadata=meta)
 
         meta["stop_loss_pct"] = _SL_PCT
+        # [개선] 쿨타임 시작: 매수 신호 발생 시각 기록 (단조 시간 사용)
+        # 이후 _COOLTIME_SEC(15분)간 동일 종목 재진입 차단
+        self._last_buy_times[ticker] = time.monotonic()
         logger.info(
             f"[triple_ema] ★ 눌림목돌파 | {ticker} | "
             f"EMA10={ema10:.0f} EMA20={ema20:.0f} EMA50={ema50:.0f} | "
-            f"HTF_EMA{_HTF_EMA}={ema_htf:.0f} ADX={adx:.1f}"
+            f"HTF_EMA{_HTF_EMA}={ema_htf:.0f} ADX={adx:.1f} (쿨타임 시작)"
         )
         return BuySignal(
             ticker=ticker, should_buy=True, current_price=current_price,

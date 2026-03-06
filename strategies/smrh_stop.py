@@ -59,9 +59,14 @@ _STOCH_D      = 3
 _STOCH_SMOOTH = 3
 
 # ── 공통 파라미터 ───────────────────────────────────────────────────────────
-_RSI_PERIOD = 14
-_RSI_MIN    = 50.0   # 4h + 30m 공통 RSI 최소 기준
-_MA_PERIOD  = 20     # 일봉 이동평균 기간
+_RSI_PERIOD     = 14
+_RSI_MIN        = 50.0   # 4h + 30m 공통 RSI 최소 기준
+_MA_PERIOD      = 20     # 일봉 이동평균 기간
+
+# ── [개선] 거래량 필터 파라미터 ─────────────────────────────────────────────
+# 가짜 돌파(Fakeout) 방지: 돌파 시점의 30m 거래량이 충분해야만 진짜 돌파로 인정
+_VOL_MULT_30M   = 1.5    # 진짜 돌파 인정 거래량 배수 (직전 N봉 평균 대비)
+_VOL_SMA_PERIOD = 20     # 거래량 SMA 산출 기간 (30m봉 기준)
 
 
 class SMRHStopStrategy(BaseStrategy):
@@ -95,6 +100,10 @@ class SMRHStopStrategy(BaseStrategy):
             stoch_30m = self._md.compute_stochastic(ticker, _STOCH_K, _STOCH_D, _STOCH_SMOOTH, _INTERVAL_30M)
             rsi_30m   = self._md.compute_rsi_intraday(ticker, _RSI_PERIOD, _INTERVAL_30M)
             ha_30m    = self._md.compute_ha_intraday(ticker, _INTERVAL_30M, count=50)
+            # [개선] 30m 거래량 — 가짜 돌파(Fakeout) 필터용: 진입 시점 거래량 확인
+            vol_cur_30m, vol_sma_30m = self._md.compute_volume_sma_intraday(
+                ticker, _VOL_SMA_PERIOD, _INTERVAL_30M
+            )
         except DataFetchError as e:
             logger.warning(f"[smrh] 데이터 오류: {ticker} - {e}")
             return BuySignal(ticker, False, current_price, "DATA_ERROR")
@@ -123,6 +132,8 @@ class SMRHStopStrategy(BaseStrategy):
             "stoch_30m_k":       round(stoch_30m["k"],    1),
             "stoch_30m_d":       round(stoch_30m["d"],    1),
             "rsi_30m":           round(rsi_30m,            1),
+            # [개선] 거래량 비율: 진짜 돌파 확인용
+            "vol_ratio_30m":     round(vol_cur_30m / vol_sma_30m if vol_sma_30m > 0 else 0.0, 2),
         }
 
         # ── 4h 상위 추세 필터 (전부 AND) ─────────────────────────────────────
@@ -170,6 +181,21 @@ class SMRHStopStrategy(BaseStrategy):
             logger.debug(f"[smrh] {ticker} | 30M_FAIL:" + ",".join(failed))
             return BuySignal(ticker, False, current_price,
                              "30M_FILTER:" + ",".join(failed), metadata=meta)
+
+        # ── [개선] 거래량 필터: 돌파 시점 30m 거래량 ≥ 직전 20봉 평균 × 1.5 ──
+        # 가짜 돌파(Fakeout) 방지: 거래량이 뒷받침되는 진짜 돌파만 진입
+        # 거래량이 평균 이하인 돌파는 세력 없는 가짜 돌파일 가능성이 높음
+        vol_ratio_30m = vol_cur_30m / vol_sma_30m if vol_sma_30m > 0 else 0.0
+        if vol_ratio_30m < _VOL_MULT_30M:
+            logger.debug(
+                f"[smrh] {ticker} | VOL_WEAK_30M: "
+                f"{vol_ratio_30m:.2f}x < {_VOL_MULT_30M}x (가짜돌파 의심 → 패스)"
+            )
+            return BuySignal(
+                ticker, False, current_price,
+                f"VOL_WEAK_30M({vol_ratio_30m:.2f}x<{_VOL_MULT_30M}x)",
+                metadata=meta,
+            )
 
         # ── 스탑 매수 트리거: 하이킨아시 첫 양봉전환 봉 고점 돌파 ─────────────
         turned_rows = ha_30m[ha_30m["turned_bullish"]]
@@ -244,10 +270,13 @@ class SMRHStopStrategy(BaseStrategy):
         except DataFetchError:
             return SellSignal(ticker, False, current_price, "")
 
-        # ── SL1: 30m MACD 히스토그램 음수 전환 (단기 추세 반전) ──────────────
-        if macd_30m["hist"] < 0:
-            reason = f"MACD_30M_NEG({macd_30m['hist']:.4f})"
-            logger.info(f"[smrh] 매도(MACD반전) | {ticker} | {reason}")
+        # ── SL1: 30m MACD 히스토그램 음수 전환 — 직전 완성 캔들 기준 ──────────
+        # [개선] 실시간 틱(hist) → 직전 종가 캔들(hist_prev) 기준으로 변경
+        # 이유: 현재 미완성 캔들이 일시적으로 음수를 보이다가 복귀하는
+        #       '휩쏘(Whipsaw)' 현상에 의한 불필요한 손절매 방지
+        if macd_30m["hist_prev"] < 0:
+            reason = f"MACD_30M_NEG_PREV({macd_30m['hist_prev']:.4f})"
+            logger.info(f"[smrh] 매도(MACD반전-직전봉) | {ticker} | {reason}")
             self._entry_lows.pop(ticker, None)
             return SellSignal(ticker, True, current_price, reason)
 
