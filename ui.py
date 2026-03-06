@@ -60,6 +60,17 @@ C = type("C", (), {
 })()
 
 
+# ─── 실제거래 시나리오 행 데이터 ─────────────────────────────────────────────────
+
+class RealScenarioRow:
+    """UI에서 실제거래 시나리오 하나를 나타내는 데이터 클래스"""
+    def __init__(self, idx: int = 0) -> None:
+        self.strategy_var  = tk.StringVar(value=STRATEGY_KEYS[idx % len(STRATEGY_KEYS)])
+        self.weight_var    = tk.StringVar(value="100")       # 계좌 자금 중 비중 (%)
+        self.budget_pct_var = tk.StringVar(value="30")       # 시나리오 자금의 1회 거래 비중 (%)
+        self._frame: tk.Frame | None = None
+
+
 # ─── 가상계좌 행 데이터 ───────────────────────────────────────────────────────
 
 class PaperAccountRow:
@@ -71,7 +82,7 @@ class PaperAccountRow:
         self.balance_var          = tk.StringVar(value=f"{config.PAPER_DEFAULT_BALANCE:,}")
         self.weight_var           = tk.StringVar(value="")           # 가중치% (자동계산)
         self.ticker_count_var     = tk.StringVar(value=str(config.PAPER_DEFAULT_TICKER_COUNT))
-        self.budget_per_trade_var = tk.StringVar(value=f"{config.PAPER_DEFAULT_BUDGET_PER_TRADE:,}")
+        self.budget_pct_var       = tk.StringVar(value=str(int(config.PAPER_DEFAULT_BUDGET_PCT)))
         self._frame: tk.Frame | None = None
 
 
@@ -81,9 +92,9 @@ class TradingApp(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Upbit 자동매매 시스템")
-        self.geometry("1120x780")
-        self.minsize(900, 640)
+        self.title("Upbit 자동매매 시스템  v3")
+        self.geometry("1200x820")
+        self.minsize(960, 680)
         self.configure(bg=C.BG)
 
         # 실행 상태 (실제 / 가상 독립 관리)
@@ -95,6 +106,7 @@ class TradingApp(tk.Tk):
         self._trader_thread: threading.Thread | None = None
         self._real_running  = False
         self._paper_running = False
+        self._real_scenario_rows: list[RealScenarioRow] = []
         self._paper_rows: list[PaperAccountRow] = []
         self._trade_log_wins: dict[str, tk.Toplevel] = {}  # 거래 로그 팝업 창 관리
         self._param_vars: dict[str, dict[str, tk.Variable]] = {}  # 전략 파라미터 슬라이더
@@ -154,7 +166,7 @@ class TradingApp(tk.Tk):
         main = tk.Frame(self, bg=C.BG)
         main.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
-        left = tk.Frame(main, bg=C.BG2, width=380)
+        left = tk.Frame(main, bg=C.BG2, width=420)
         left.pack(side="left", fill="y", padx=(0, 6))
         left.pack_propagate(False)
         self._build_left_panel(left)
@@ -246,8 +258,8 @@ class TradingApp(tk.Tk):
         self._left_notebook = nb
 
     def _build_trade_settings(self, parent: tk.Frame) -> None:
-        def lbl(f, txt): return tk.Label(f, text=txt, font=("Arial", 9), fg=C.FG,
-                                          bg=C.BG2, width=9, anchor="w")
+        def lbl(f, txt, w=9): return tk.Label(f, text=txt, font=("Arial", 9), fg=C.FG,
+                                               bg=C.BG2, width=w, anchor="w")
 
         # ════════════════════════════════════════════════════════════════════
         # ① 하단 고정 영역을 side="bottom"으로 먼저 pack (역순 → 화면상 정순)
@@ -304,10 +316,16 @@ class TradingApp(tk.Tk):
         tk.Frame(parent, bg=C.BG3, height=1).pack(
             side="bottom", fill="x", padx=10, pady=(10, 0))
 
+        # 리스크 설정 (손절 + 낙폭)
+        tk.Label(parent, text="▶  리스크 관리", font=("Arial", 9, "bold"),
+                 fg=C.ACCENT, bg=C.BG2).pack(side="bottom", anchor="w", padx=12, pady=(4, 0))
+        tk.Frame(parent, bg=C.BG3, height=1).pack(
+            side="bottom", fill="x", padx=10, pady=(10, 0))
+
         # 낙폭
         self._drawdown_var = tk.IntVar(value=int(config.MAX_DRAWDOWN_PCT * 100))
         f3 = tk.Frame(parent, bg=C.BG2)
-        f3.pack(side="bottom", fill="x", padx=12, pady=3)
+        f3.pack(side="bottom", fill="x", padx=12, pady=2)
         lbl(f3, "낙폭(%)").pack(side="left")
         tk.Scale(f3, variable=self._drawdown_var, from_=5, to=50,
                  orient="horizontal", bg=C.BG2, fg=C.FG,
@@ -319,7 +337,7 @@ class TradingApp(tk.Tk):
         # 손절
         self._stoploss_var = tk.IntVar(value=int(config.STOP_LOSS_PCT * 100))
         f2 = tk.Frame(parent, bg=C.BG2)
-        f2.pack(side="bottom", fill="x", padx=12, pady=3)
+        f2.pack(side="bottom", fill="x", padx=12, pady=2)
         lbl(f2, "손절(%)").pack(side="left")
         tk.Scale(f2, variable=self._stoploss_var, from_=1, to=20,
                  orient="horizontal", bg=C.BG2, fg=C.FG,
@@ -328,36 +346,44 @@ class TradingApp(tk.Tk):
         tk.Label(f2, textvariable=self._stoploss_var, width=3,
                  font=("Arial", 9, "bold"), fg=C.RED, bg=C.BG2).pack(side="left")
 
-        # 예산
-        f1 = tk.Frame(parent, bg=C.BG2)
-        f1.pack(side="bottom", fill="x", padx=12, pady=3)
-        lbl(f1, "예산(원)").pack(side="left")
-        self._budget_var = tk.StringVar(value=str(config.BUDGET_PER_TRADE))
-        tk.Entry(f1, textvariable=self._budget_var, font=("Consolas", 9),
-                 bg=C.BG3, fg=C.FG, insertbackground=C.FG,
-                 relief="flat", bd=4).pack(side="left", fill="x", expand=True)
-
-        tk.Label(parent, text="▶  거래 설정", font=("Arial", 9, "bold"),
-                 fg=C.ACCENT, bg=C.BG2).pack(side="bottom", anchor="w", padx=12, pady=(4, 2))
-        tk.Frame(parent, bg=C.BG3, height=1).pack(
-            side="bottom", fill="x", padx=10, pady=(10, 0))
-
         # ════════════════════════════════════════════════════════════════════
-        # ② 상단 고정 영역: 전략 + 종목 헤더 (side="top", 기본값)
+        # ② 상단: 실제거래 전략 카드 + 종목
         # ════════════════════════════════════════════════════════════════════
 
-        # 전략 선택
+        # 실제거래 전략 카드 영역
         tk.Frame(parent, bg=C.BG3, height=1).pack(fill="x", padx=10, pady=(10, 0))
-        tk.Label(parent, text="▶  전략 선택", font=("Arial", 9, "bold"),
-                 fg=C.ACCENT, bg=C.BG2).pack(anchor="w", padx=12, pady=(4, 2))
-        self._strategy_var = tk.StringVar(value=STRATEGY_KEYS[0])
-        ttk.Combobox(parent, textvariable=self._strategy_var,
-                     values=STRATEGY_KEYS, state="readonly",
-                     font=("Consolas", 8)).pack(fill="x", padx=12, pady=4)
+        sh = tk.Frame(parent, bg=C.BG2)
+        sh.pack(fill="x", padx=12, pady=(4, 2))
+        tk.Label(sh, text="▶  실제 전략 (멀티)", font=("Arial", 9, "bold"),
+                 fg=C.PEACH, bg=C.BG2).pack(side="left")
+        self._real_weight_info = tk.Label(sh, text="", font=("Arial", 8),
+                                           fg=C.YELLOW, bg=C.BG2)
+        self._real_weight_info.pack(side="left", padx=(6, 0))
+        tk.Button(sh, text="+ 추가", font=("Arial", 8, "bold"),
+                  bg=C.PEACH, fg=C.HEADER, relief="flat", bd=0, padx=6, pady=1,
+                  cursor="hand2", command=self._add_real_scenario
+                  ).pack(side="right", padx=(4, 0))
+        tk.Button(sh, text="- 삭제", font=("Arial", 8),
+                  bg=C.BG3, fg=C.FG, relief="flat", bd=0, padx=6, pady=1,
+                  cursor="hand2", command=self._remove_real_scenario
+                  ).pack(side="right")
+
+        # 실제 전략 카드 스크롤 영역
+        real_wrap = tk.Frame(parent, bg=C.BG3, bd=1, relief="flat")
+        real_wrap.pack(fill="x", padx=12, pady=(0, 4))
+
+        self._real_card_inner = tk.Frame(real_wrap, bg=C.BG2)
+        self._real_card_inner.pack(fill="x")
+
+        # 기본 1개 시나리오 생성
+        row0 = RealScenarioRow(0)
+        self._real_scenario_rows.append(row0)
+        self._render_real_scenario_row(row0)
+        self._update_real_weights()
 
         # 종목 헤더
         self._ticker_vars: dict[str, tk.BooleanVar] = {}
-        tk.Frame(parent, bg=C.BG3, height=1).pack(fill="x", padx=10, pady=(10, 0))
+        tk.Frame(parent, bg=C.BG3, height=1).pack(fill="x", padx=10, pady=(6, 0))
 
         th = tk.Frame(parent, bg=C.BG2)
         th.pack(fill="x", padx=12, pady=(4, 0))
@@ -415,6 +441,80 @@ class TradingApp(tk.Tk):
         self._ticker_inner.bind("<MouseWheel>", _scroll_ticker)
         # 체크박스 마우스휠 전달용 (populate 시 각 위젯에도 바인딩)
         self._ticker_scroll_fn = _scroll_ticker
+
+    # ─── 실제 전략 카드 렌더링 ────────────────────────────────────────────────
+
+    def _render_real_scenario_row(self, row: RealScenarioRow) -> None:
+        """실제거래 멀티전략 카드 (전략 + 비중% + 1회매매%) 렌더링"""
+        card = tk.Frame(self._real_card_inner, bg=C.BG3, bd=1, relief="flat")
+        card.pack(fill="x", padx=4, pady=2, ipady=2)
+        row._frame = card
+
+        # 1줄: 전략 콤보박스
+        line1 = tk.Frame(card, bg=C.BG3)
+        line1.pack(fill="x", padx=6, pady=(3, 1))
+        ttk.Combobox(line1, textvariable=row.strategy_var,
+                     values=STRATEGY_KEYS, state="readonly",
+                     font=("Consolas", 7), width=32).pack(side="left", fill="x", expand=True)
+
+        # 2줄: 비중% + 1회매매%
+        line2 = tk.Frame(card, bg=C.BG3)
+        line2.pack(fill="x", padx=6, pady=(1, 3))
+
+        tk.Label(line2, text="비중", font=("Arial", 8), fg=C.SUB,
+                 bg=C.BG3).pack(side="left")
+        tk.Entry(line2, textvariable=row.weight_var, width=4,
+                 font=("Consolas", 9, "bold"), bg=C.BG2, fg=C.PEACH,
+                 insertbackground=C.FG, relief="flat", bd=2,
+                 justify="center").pack(side="left", padx=2)
+        tk.Label(line2, text="%", font=("Arial", 8), fg=C.SUB,
+                 bg=C.BG3).pack(side="left")
+
+        tk.Label(line2, text="  1회매매", font=("Arial", 8), fg=C.SUB,
+                 bg=C.BG3).pack(side="left", padx=(8, 0))
+        tk.Entry(line2, textvariable=row.budget_pct_var, width=4,
+                 font=("Consolas", 9, "bold"), bg=C.BG2, fg=C.GREEN,
+                 insertbackground=C.FG, relief="flat", bd=2,
+                 justify="center").pack(side="left", padx=2)
+        tk.Label(line2, text="%", font=("Arial", 8), fg=C.SUB,
+                 bg=C.BG3).pack(side="left")
+
+    def _add_real_scenario(self) -> None:
+        """실제거래 시나리오 추가"""
+        idx = len(self._real_scenario_rows)
+        row = RealScenarioRow(idx)
+        self._real_scenario_rows.append(row)
+        self._render_real_scenario_row(row)
+        self._update_real_weights()
+
+    def _remove_real_scenario(self) -> None:
+        """실제거래 시나리오 마지막 삭제"""
+        if len(self._real_scenario_rows) > 1:
+            row = self._real_scenario_rows.pop()
+            if row._frame:
+                row._frame.destroy()
+            self._update_real_weights()
+
+    def _update_real_weights(self) -> None:
+        """실제거래 비중% 합계 표시"""
+        n = len(self._real_scenario_rows)
+        if n == 0:
+            return
+        # 자동 균등배분 (사용자가 수동으로 바꿀 수 있음)
+        if n > 1:
+            per = round(100.0 / n, 1)
+            for row in self._real_scenario_rows:
+                row.weight_var.set(str(per))
+        else:
+            self._real_scenario_rows[0].weight_var.set("100")
+        try:
+            total_w = sum(float(r.weight_var.get()) for r in self._real_scenario_rows)
+            self._real_weight_info.config(
+                text=f"합계: {total_w:.0f}%  │  {n}개 전략",
+                fg=C.GREEN if abs(total_w - 100) < 1 else C.RED,
+            )
+        except ValueError:
+            self._real_weight_info.config(text="비중 입력 오류", fg=C.RED)
 
     def _build_paper_tab(self, parent: tk.Frame) -> None:
         # ── 상단: 전체 예산 입력 + 균등 배분 ──
@@ -522,9 +622,12 @@ class TradingApp(tk.Tk):
 
         tk.Label(line2, text="1회", font=("Arial", 8), fg=C.SUB,
                  bg=C.BG3).pack(side="left", padx=(4, 0))
-        tk.Entry(line2, textvariable=row.budget_per_trade_var, width=7,
-                 font=("Consolas", 8), bg=C.BG2, fg=C.FG,
-                 insertbackground=C.FG, relief="flat", bd=2).pack(side="left", padx=2)
+        tk.Entry(line2, textvariable=row.budget_pct_var, width=4,
+                 font=("Consolas", 8, "bold"), bg=C.BG2, fg=C.GREEN,
+                 insertbackground=C.FG, relief="flat", bd=2,
+                 justify="center").pack(side="left", padx=2)
+        tk.Label(line2, text="%", font=("Arial", 8), fg=C.SUB,
+                 bg=C.BG3).pack(side="left")
 
     def _distribute_paper_budget_equally(self) -> None:
         """전체 예산을 시나리오별 균등 배분"""
@@ -989,11 +1092,12 @@ class TradingApp(tk.Tk):
         # 실제 포지션 탭
         pf = tk.Frame(nb, bg=C.BG); nb.add(pf, text="  실제 포지션  ")
         self._real_pos_tree = self._make_tree(pf, [
-            ("ticker",    "종목",     90),
-            ("buy_price", "매수가",   120),
-            ("volume",    "수량",     140),
-            ("stop_loss", "손절가",   120),
-            ("pnl",       "평가손익", 100),
+            ("scenario",  "전략",      90),
+            ("ticker",    "종목",      80),
+            ("buy_price", "매수가",   110),
+            ("volume",    "수량",     120),
+            ("stop_loss", "손절가",   110),
+            ("pnl",       "평가손익",  90),
         ])
         tk.Label(pf, text="* 3초 갱신", font=("Arial", 8),
                  fg=C.SUB, bg=C.BG).pack(anchor="e", padx=8, pady=2)
@@ -1052,20 +1156,30 @@ class TradingApp(tk.Tk):
         if not tickers:
             messagebox.showwarning("경고", "거래 종목을 하나 이상 선택하세요.")
             return False
+
+        # 멀티전략 비중 검증
         try:
-            budget = int(self._budget_var.get().replace(",", ""))
-            assert budget >= config.MIN_ORDER_KRW
-        except Exception:
-            messagebox.showwarning("경고", f"예산은 {config.MIN_ORDER_KRW:,}원 이상이어야 합니다.")
+            total_w = sum(float(r.weight_var.get()) for r in self._real_scenario_rows)
+            if total_w <= 0:
+                raise ValueError
+        except (ValueError, AttributeError):
+            messagebox.showwarning("경고", "실제 전략의 비중(%)을 올바르게 입력하세요.")
             return False
 
-        strat_id, scen_id = STRATEGIES[self._strategy_var.get()]
+        # 첫 번째 시나리오 기준으로 config 기본값 설정 (하위 호환)
+        first_row = self._real_scenario_rows[0]
+        strat_id, scen_id = STRATEGIES[first_row.strategy_var.get()]
         config.SELECTED_STRATEGY = strat_id
         config.SELECTED_SCENARIO = scen_id
         config.TICKERS           = tickers
-        config.BUDGET_PER_TRADE  = budget
         config.STOP_LOSS_PCT     = self._stoploss_var.get() / 100
         config.MAX_DRAWDOWN_PCT  = self._drawdown_var.get() / 100
+
+        try:
+            config.BUDGET_PER_TRADE_PCT = float(first_row.budget_pct_var.get())
+        except (ValueError, AttributeError):
+            config.BUDGET_PER_TRADE_PCT = 30.0
+
         return True
 
     def _init_obsidian_notif(self) -> None:
@@ -1197,7 +1311,40 @@ class TradingApp(tk.Tk):
     def _run_real_trader(self) -> None:
         try:
             from core.trader import Trader
-            self._trader = Trader()
+
+            # 멀티시나리오 빌드
+            tickers = [t for t, v in self._ticker_vars.items() if v.get()]
+            scenarios = []
+            for row in self._real_scenario_rows:
+                strat_id, scen_id = STRATEGIES.get(
+                    row.strategy_var.get(),
+                    (config.SELECTED_STRATEGY, config.SELECTED_SCENARIO),
+                )
+                try:
+                    weight = float(row.weight_var.get())
+                except ValueError:
+                    weight = 100.0
+                try:
+                    bpct = float(row.budget_pct_var.get())
+                except ValueError:
+                    bpct = 30.0
+                scenarios.append({
+                    "strategy_id": strat_id,
+                    "scenario_id": scen_id,
+                    "tickers":     tickers,
+                    "weight_pct":  weight,
+                    "budget_pct":  bpct,
+                })
+
+            # 단일 전략이면 None 전달 (기존 호환), 멀티면 scenarios 전달
+            self._trader = Trader(
+                scenarios=scenarios if len(scenarios) > 1 else None
+            )
+            # 단일 전략일 때 budget_pct 반영
+            if len(scenarios) == 1:
+                self._trader._scenarios[0].budget_pct = scenarios[0]["budget_pct"]
+                self._trader._scenarios[0].weight_pct = scenarios[0]["weight_pct"]
+
             if self._obsidian:
                 self._trader.obsidian_logger = self._obsidian
             if self._notif_mgr:
@@ -1265,9 +1412,9 @@ class TradingApp(tk.Tk):
                 ticker_count = config.PAPER_DEFAULT_TICKER_COUNT
 
             try:
-                budget_pt = int(row.budget_per_trade_var.get().replace(",", ""))
+                budget_pct = float(row.budget_pct_var.get())
             except ValueError:
-                budget_pt = config.PAPER_DEFAULT_BUDGET_PER_TRADE
+                budget_pct = config.PAPER_DEFAULT_BUDGET_PCT
 
             strat_key = row.strategy_var.get()
             strat_id, scen_id = STRATEGIES.get(
@@ -1285,7 +1432,7 @@ class TradingApp(tk.Tk):
             scenario = PaperScenario(
                 account, market_data, strat_id, scen_id,
                 tickers=scenario_tickers,
-                budget_per_trade=budget_pt,
+                budget_pct=budget_pct,
             )
             scenarios.append(scenario)
 
@@ -1360,8 +1507,9 @@ class TradingApp(tk.Tk):
                 tag = "profit" if pnl_pct >= 0 else "loss"
             except Exception:
                 pnl_str, tag = "—", ""
+            scen = getattr(pos, "scenario_id", "—") or "—"
             self._real_pos_tree.insert("", "end", tags=(tag,), values=(
-                pos.ticker, f"{pos.buy_price:,.0f}", f"{pos.volume:.8f}",
+                scen, pos.ticker, f"{pos.buy_price:,.0f}", f"{pos.volume:.8f}",
                 f"{pos.stop_loss_price:,.0f}", pnl_str,
             ))
 

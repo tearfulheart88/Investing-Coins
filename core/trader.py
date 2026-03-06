@@ -1,6 +1,7 @@
 import time
 import threading
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
@@ -26,6 +27,18 @@ logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 
 
+@dataclass
+class RealScenario:
+    """실거래 멀티전략 시나리오."""
+    strategy_id: str
+    scenario_id: str
+    strategy: object          # BaseStrategy 인스턴스
+    tickers: list[str] = field(default_factory=list)
+    weight_pct: float = 100.0          # 전체 자금 중 이 시나리오 비중 (%)
+    budget_pct: float = 30.0           # 시나리오 자금 중 1회 거래 비중 (%)
+    daily_buy_tracker: dict = field(default_factory=dict)
+
+
 class Trader:
     """
     자동매매 시스템 중앙 조율자.
@@ -37,43 +50,70 @@ class Trader:
     - OrderResult 타입: 체결 확인된 실체결 수량/가격 보장
     """
 
-    def __init__(self) -> None:
+    def __init__(self, scenarios: list[dict] | None = None) -> None:
         logger.info("=== Upbit Auto-Trading System 초기화 ===")
 
         self.client      = UpbitClient(config.ACCESS_KEY, config.SECRET_KEY)
         self.price_cache = PriceCache()
         self.market_data = MarketData()
         self.state       = StateManager(config.POSITIONS_PATH)
-        self.strategy    = load_strategy(
-            self.market_data,
-            config.SELECTED_STRATEGY,
-            config.SELECTED_SCENARIO,
-        )
+
+        # ── 멀티시나리오 / 단일전략 초기화 ──────────────────────────────────────
+        if scenarios:
+            self._scenarios: list[RealScenario] = []
+            all_tickers: set[str] = set()
+            for s in scenarios:
+                strat = load_strategy(self.market_data, s["strategy_id"], s["scenario_id"])
+                rs = RealScenario(
+                    strategy_id=s["strategy_id"],
+                    scenario_id=s["scenario_id"],
+                    strategy=strat,
+                    tickers=s.get("tickers", list(config.TICKERS)),
+                    weight_pct=s.get("weight_pct", 100.0),
+                    budget_pct=s.get("budget_pct", config.BUDGET_PER_TRADE_PCT),
+                )
+                self._scenarios.append(rs)
+                all_tickers.update(rs.tickers)
+            self._active_tickers: list[str] = list(all_tickers)
+        else:
+            # 단일전략 호환 모드 (기존 config 기반)
+            strat = load_strategy(
+                self.market_data, config.SELECTED_STRATEGY, config.SELECTED_SCENARIO,
+            )
+            self._scenarios = [RealScenario(
+                strategy_id=config.SELECTED_STRATEGY,
+                scenario_id=config.SELECTED_SCENARIO,
+                strategy=strat,
+                tickers=list(config.TICKERS),
+                weight_pct=100.0,
+                budget_pct=config.BUDGET_PER_TRADE_PCT,
+            )]
+            self._active_tickers = list(config.TICKERS)
+
+        # 첫 시나리오 strategy를 self.strategy로 유지 (scheduler 등 하위호환)
+        self.strategy = self._scenarios[0].strategy
 
         # ── 동적 종목 선택 ────────────────────────────────────────────────────
-        # USE_DYNAMIC_TICKERS=True 이면 거래대금 상위 N개 코인 자동 선택.
-        # 초기화 시점에 API 조회를 수행해 WebSocket 구독 종목을 확정.
         self._ticker_manager: DynamicTickerManager | None = None
-        if config.USE_DYNAMIC_TICKERS:
+        if config.USE_DYNAMIC_TICKERS and not scenarios:
             self._ticker_manager = DynamicTickerManager(
                 n=config.TOP_TICKERS_COUNT,
                 blacklist=config.TICKER_BLACKLIST,
                 refresh_hours=config.TICKER_REFRESH_HOURS,
             )
             try:
-                self._active_tickers: list[str] = self._ticker_manager.get_current_tickers()
+                self._active_tickers = self._ticker_manager.get_current_tickers()
                 logger.info(f"동적 종목 로드 완료: {self._active_tickers}")
             except RuntimeError as e:
                 logger.warning(f"동적 종목 로드 실패 → config.TICKERS 폴백: {e}")
                 self._active_tickers = list(config.TICKERS)
-        else:
-            self._active_tickers = list(config.TICKERS)
 
         # WebSocket 피드: _active_tickers로 구독
         self.ws   = WebSocketManager(self._active_tickers, self.price_cache)
         self.risk = RiskManager(self.client, self.state, self.price_cache)
         self.trade_logger    = TradeLogger()
-        self.session_manager = SessionManager(config.SELECTED_SCENARIO)
+        first_scenario_id = self._scenarios[0].scenario_id
+        self.session_manager = SessionManager(first_scenario_id)
         self.scheduler       = TradingScheduler(self, self.market_data, self.trade_logger)
         self.obsidian_logger = None   # ObsidianLogger 주입 가능 (ui.py에서 설정)
 
@@ -125,9 +165,6 @@ class Trader:
         self._obs_session_trades: list = []   # PaperTrade 객체 리스트
         self._session_start_equity: float = 0.0
 
-        # 일일 매수 추적 (VB 전략: 하루 1회만 매수)
-        self._daily_buy_tracker: dict[str, date] = {}
-
         # 에러 카운터 (연속 오류 감지)
         self._error_count = 0
         self._error_window_start = time.time()
@@ -135,15 +172,17 @@ class Trader:
         # 정상 종료 플래그
         self._running = False
 
+        # 시나리오 정보 로그
+        scenarios_info = ", ".join(
+            f"{s.scenario_id}({len(s.tickers)}종목/{s.weight_pct:.0f}%/{s.budget_pct:.0f}%)"
+            for s in self._scenarios
+        )
         logger.info(
-            f"전략: {config.SELECTED_STRATEGY}/{config.SELECTED_SCENARIO} | "
-            f"종목({len(self._active_tickers)}개): {self._active_tickers} | "
-            f"예산: {config.BUDGET_PER_TRADE:,}원/종목 | "
-            f"동적종목: {'ON' if config.USE_DYNAMIC_TICKERS else 'OFF'} | "
+            f"시나리오({len(self._scenarios)}개): {scenarios_info} | "
+            f"전체 종목: {len(self._active_tickers)}개 | "
             f"ATR사이징: {'ON' if config.USE_ATR_SIZING else 'OFF'} | "
             f"AutoTuner: {'ON' if config.USE_AUTO_TUNER else 'OFF'} | "
-            f"호가WS: {'ON' if config.ORDERBOOK_WS_ENABLED else 'OFF'} | "
-            f"스코어선정: {'ON' if config.USE_SCORE_SELECTION else 'OFF'}"
+            f"호가WS: {'ON' if config.ORDERBOOK_WS_ENABLED else 'OFF'}"
         )
 
     # ─── 시작 / 종료 ─────────────────────────────────────────────────────────
@@ -245,10 +284,9 @@ class Trader:
         while self._running:
             loop_start = time.time()
 
-            # ── 동적 종목 갱신 체크 ──────────────────────────────────────────
+            # ── 동적 종목 갱신 체크 (단일전략 호환 모드에서만) ────────────────
             if self._ticker_manager:
                 try:
-                    # 스코어 기반 선정 (UniverseSelector 활성 시)
                     if self.universe_selector:
                         new_tickers, changed = self._ticker_manager.refresh_if_needed(
                             custom_fetcher=lambda n: self.universe_selector.select_top_n(n)
@@ -263,14 +301,21 @@ class Trader:
             # ── 상태머신 타임아웃 처리 ───────────────────────────────────────
             self._handle_order_timeouts()
 
-            for ticker in self._active_tickers:
+            # ── 시나리오별 종목 처리 ─────────────────────────────────────────
+            for scenario in self._scenarios:
                 if not self._running:
                     break
-                try:
-                    self._process_ticker(ticker)
-                except Exception as e:
-                    logger.error(f"티커 처리 중 예외: {ticker} - {e}", exc_info=True)
-                    self._record_error()
+                for ticker in scenario.tickers:
+                    if not self._running:
+                        break
+                    try:
+                        self._process_ticker(ticker, scenario)
+                    except Exception as e:
+                        logger.error(
+                            f"[{scenario.scenario_id}][{ticker}] 처리 오류: {e}",
+                            exc_info=True,
+                        )
+                        self._record_error()
 
             if self._is_error_threshold_exceeded():
                 logger.critical("연속 에러 임계치 초과 - 시스템 종료")
@@ -280,8 +325,11 @@ class Trader:
             sleep_time = max(0.0, config.PRICE_CHECK_INTERVAL_SEC - elapsed)
             time.sleep(sleep_time)
 
-    def _process_ticker(self, ticker: str) -> None:
+    def _process_ticker(self, ticker: str, scenario: RealScenario | None = None) -> None:
         """단일 종목 처리: 가격 조회 → 상태머신 → 손절/매도신호 → 매수신호"""
+        if scenario is None:
+            scenario = self._scenarios[0]  # 하위호환
+
         price = self._get_price(ticker)
         if price is None:
             return
@@ -294,11 +342,15 @@ class Trader:
             if self.state.has_position(ticker):
                 position = self.state.get_position(ticker)
 
+                # 이 시나리오가 소유한 포지션인지 확인
+                if position.scenario_id != scenario.scenario_id:
+                    return  # 다른 시나리오 소유 → 스킵
+
                 # 1. 전략 고유 매도 신호
-                sell_signal = self.strategy.should_sell_on_signal(ticker, price, position)
+                sell_signal = scenario.strategy.should_sell_on_signal(ticker, price, position)
                 if sell_signal.should_sell:
                     # ── 재진입(Re-entry) 체크 ──────────────────────────────
-                    if self._should_reentry(sell_signal, position, price):
+                    if self._should_reentry(sell_signal, position, price, scenario):
                         self._execute_reentry(position, price, sell_signal.reason)
                         return
                     self._execute_sell(position, price, reason=sell_signal.reason)
@@ -311,20 +363,20 @@ class Trader:
 
             else:
                 # 3. 일일 매수 중복 체크 (스케줄 매도 전략만: 하루 1회)
-                if self.strategy.requires_scheduled_sell() and self._already_bought_today(ticker):
+                if scenario.strategy.requires_scheduled_sell() and self._already_bought_today(scenario, ticker):
                     return
 
                 # 4. AutoTuner 필터 (활성 시)
                 if self.auto_tuner and not self._check_auto_tuner(ticker):
                     return
 
-                buy_signal = self.strategy.should_buy(ticker, price)
+                buy_signal = scenario.strategy.should_buy(ticker, price)
                 self.trade_logger.log_signal(buy_signal)
 
                 if buy_signal.should_buy:
                     allowed, reason = self.risk.can_open_new_position(ticker)
                     if allowed:
-                        self._execute_buy(ticker, price, buy_signal)
+                        self._execute_buy(ticker, price, buy_signal, scenario)
                     else:
                         logger.debug(f"매수 차단: {ticker} - {reason}")
 
@@ -379,7 +431,8 @@ class Trader:
 
     # ─── 재진입 (Re-entry) ──────────────────────────────────────────────────
 
-    def _should_reentry(self, sell_signal, position, price: float) -> bool:
+    def _should_reentry(self, sell_signal, position, price: float,
+                        scenario: RealScenario | None = None) -> bool:
         """
         재진입 조건 판단.
 
@@ -388,8 +441,8 @@ class Trader:
           2. 매도 신호가 수익 구간에서 발생했을 것 (current_price > buy_price)
           3. 손절(STOP_LOSS)은 재진입 제외
         """
-        scenario = config.SELECTED_SCENARIO
-        if scenario not in config.REENTRY_ENABLED_SCENARIOS:
+        scen_id = scenario.scenario_id if scenario else config.SELECTED_SCENARIO
+        if scen_id not in config.REENTRY_ENABLED_SCENARIOS:
             return False
         if "STOP_LOSS" in sell_signal.reason:
             return False
@@ -432,34 +485,39 @@ class Trader:
 
     # ─── 일일 매수 추적 ──────────────────────────────────────────────────────
 
-    def _already_bought_today(self, ticker: str) -> bool:
+    def _already_bought_today(self, scenario: RealScenario, ticker: str) -> bool:
         """오늘 이미 매수한 종목인지 확인 (VB 전략: 1일 1매수)"""
         today = datetime.now(KST).date()
-        return self._daily_buy_tracker.get(ticker) == today
+        return scenario.daily_buy_tracker.get(ticker) == today
 
-    def _mark_bought_today(self, ticker: str) -> None:
-        self._daily_buy_tracker[ticker] = datetime.now(KST).date()
+    def _mark_bought_today(self, scenario: RealScenario, ticker: str) -> None:
+        scenario.daily_buy_tracker[ticker] = datetime.now(KST).date()
 
     def reset_daily_tracker(self) -> None:
         """09:00 스케줄 매도 후 호출 → 새 거래일 시작"""
-        self._daily_buy_tracker.clear()
+        for s in self._scenarios:
+            s.daily_buy_tracker.clear()
         logger.info("일일 매수 추적기 초기화")
 
     # ─── 매수 실행 ────────────────────────────────────────────────────────────
 
-    def _execute_buy(self, ticker: str, price: float, signal) -> None:
+    def _execute_buy(self, ticker: str, price: float, signal,
+                     scenario: RealScenario | None = None) -> None:
         """주문 → 체결 확인(폴링) → 상태 업데이트"""
-        # ── ATR 기반 포지션 사이징 (USE_ATR_SIZING=True) ─────────────────────
-        buy_amount = config.BUDGET_PER_TRADE
+        if scenario is None:
+            scenario = self._scenarios[0]
+
+        # ── 예산 계산 (% 기반) ──────────────────────────────────────────────
+        equity = self.risk.get_total_equity()
+        scenario_equity = equity * scenario.weight_pct / 100
         sizing_sl_price = 0.0
 
         if self.position_sizer:
             try:
-                equity = self.risk.get_total_equity()
                 atr, atr_pct, _ = self.market_data.compute_atr_pct(ticker)
                 sl_mult = signal.metadata.get("sl_atr_mult", 1.5) if signal.metadata else 1.5
                 sizing = self.position_sizer.calculate(
-                    equity_krw=equity,
+                    equity_krw=scenario_equity,
                     entry_price=price,
                     atr=atr,
                     sl_atr_mult=sl_mult,
@@ -474,8 +532,14 @@ class Trader:
                     f"SL={sizing.sl_price:,.0f} risk={sizing.risk_pct:.4f}"
                 )
             except Exception as e:
-                logger.warning(f"[PositionSizer] 계산 실패 → 고정금액 사용: {ticker} - {e}")
-                buy_amount = config.BUDGET_PER_TRADE
+                logger.warning(f"[PositionSizer] 계산 실패 → % 예산 사용: {ticker} - {e}")
+                buy_amount = int(scenario_equity * scenario.budget_pct / 100)
+        else:
+            # % 기반 예산 계산
+            buy_amount = int(scenario_equity * scenario.budget_pct / 100)
+
+        buy_amount = min(buy_amount, config.MAX_ORDER_KRW)
+        buy_amount = max(buy_amount, config.MIN_ORDER_KRW)
 
         logger.info(f"매수 시도 | {ticker} | price={price:,.0f} | amount={buy_amount:,}원 | reason={signal.reason}")
 
@@ -495,8 +559,8 @@ class Trader:
             self.order_sm.cancel_entry(ticker, reason=str(e))
             self.trade_logger.log_trade(TradeRecord(
                 ticker=ticker, action="BUY", price=price, volume=0,
-                strategy_id=self.strategy.get_strategy_id(),
-                scenario_id=self.strategy.get_scenario_id(),
+                strategy_id=scenario.strategy_id,
+                scenario_id=scenario.scenario_id,
                 reason=signal.reason, order_uuid="FAILED",
                 error=str(e),
             ))
@@ -528,8 +592,8 @@ class Trader:
             krw_spent=buy_amount,
             order_uuid=order.uuid,
             stop_loss_price=stop_loss_price,
-            strategy_id=self.strategy.get_strategy_id(),
-            scenario_id=self.strategy.get_scenario_id(),
+            strategy_id=scenario.strategy_id,
+            scenario_id=scenario.scenario_id,
         )
 
         self.state.add_position(position)

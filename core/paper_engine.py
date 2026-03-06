@@ -31,11 +31,13 @@ class PaperScenario:
         scenario_id: str,
         tickers: list[str] | None = None,
         budget_per_trade: int | None = None,
+        budget_pct: float | None = None,
     ) -> None:
         self.account  = account
         self.strategy = load_strategy(market_data, strategy_id, scenario_id)
         self.tickers  = tickers or list(config.TICKERS)
         self.budget_per_trade = budget_per_trade or config.BUDGET_PER_TRADE
+        self.budget_pct = budget_pct                 # None이면 고정액, 값 있으면 잔고의 N%
         self._daily_buy_tracker: dict[str, date] = {}
 
     def already_bought_today(self, ticker: str) -> bool:
@@ -305,9 +307,16 @@ class PaperEngine:
                 # 전략별 stop_loss_pct 등 메타데이터 병합 (스캘핑 전략의 0.3% SL 등)
                 if buy_signal.metadata:
                     indicators.update(buy_signal.metadata)
+                # 예산 계산: budget_pct 있으면 잔고의 N%, 없으면 고정액
+                if scenario.budget_pct is not None:
+                    buy_budget = int(account.balance * scenario.budget_pct / 100)
+                    buy_budget = max(buy_budget, config.MIN_ORDER_KRW)
+                else:
+                    buy_budget = scenario.budget_per_trade
+
                 trade = account.execute_buy(
                     ticker, price, buy_signal.reason,
-                    budget=scenario.budget_per_trade,
+                    budget=buy_budget,
                     indicators=indicators,
                 )
                 if trade:
