@@ -743,6 +743,9 @@ class TradingApp(tk.Tk):
             "time_cut_hours":    tk.DoubleVar(value=p["vb"]["time_cut_hours"]),
             "min_momentum_pct":  tk.DoubleVar(value=p["vb"]["min_momentum_pct"]),
             "vol_mult":          tk.DoubleVar(value=p["vb"]["vol_mult"]),
+            "be_trigger_pct":    tk.DoubleVar(value=p["vb"]["be_trigger_pct"]),
+            "be_floor_pct":      tk.DoubleVar(value=p["vb"]["be_floor_pct"]),
+            "trail_drop_pct":    tk.DoubleVar(value=p["vb"]["trail_drop_pct"]),
         }
         slider_row("노이즈 기간 (일)",      vb["noise_filter_days"], 3,   14,  1,    "{:.0f}일")
         slider_row("MA 기간",               vb["ma_period"],          5,   50,  1,    "{:.0f}")
@@ -751,6 +754,9 @@ class TradingApp(tk.Tk):
         slider_row("타임컷 시간 (0=비활)",   vb["time_cut_hours"],    0,   12,  0.5,  "{:.1f}h")
         slider_row("최소 수익률 기준 (%)",   vb["min_momentum_pct"],  0.0, 3.0, 0.1,  "{:.1f}%")
         slider_row("거래량 급증 배수 (5분봉)", vb["vol_mult"],         1.0, 5.0, 0.5,  "×{:.1f}")
+        slider_row("본절방어 활성 기준 (%)",  vb["be_trigger_pct"],   0.5, 3.0, 0.1,  "{:.1f}%")
+        slider_row("본절방어 최소수익 (%)",   vb["be_floor_pct"],     0.0, 1.0, 0.05, "{:.2f}%")
+        slider_row("트레일링 하락폭 (%)",    vb["trail_drop_pct"],    0.2, 2.0, 0.1,  "{:.1f}%")
         self._param_vars["vb"] = vb
         reentry_row("vb_noise_filter")
         reentry_row("vb_standard")
@@ -905,6 +911,18 @@ class TradingApp(tk.Tk):
             if "vol_mult" in vb:
                 val = float(vb["vol_mult"].get())
                 _vbf._VOL_MULT = val; _vbs._VOL_MULT = val
+            if "be_trigger_pct" in vb:
+                val = float(vb["be_trigger_pct"].get())
+                _vbf._BE_TRIGGER_PCT = val
+                config.STRATEGY_PARAMS["vb"]["be_trigger_pct"] = val
+            if "be_floor_pct" in vb:
+                val = float(vb["be_floor_pct"].get())
+                _vbf._BE_FLOOR_PCT = val
+                config.STRATEGY_PARAMS["vb"]["be_floor_pct"] = val
+            if "trail_drop_pct" in vb:
+                val = float(vb["trail_drop_pct"].get())
+                _vbf._TRAIL_DROP_PCT = val
+                config.STRATEGY_PARAMS["vb"]["trail_drop_pct"] = val
 
             # ── mr_rsi ──
             import strategies.mr_rsi as _mr_rsi

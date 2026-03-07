@@ -62,3 +62,18 @@ class BaseStrategy(ABC):
         RSI: RSI >= 70 시 True
         Bollinger: 중심선 상향 돌파 시 True
         """
+
+    # ─── 선택적 라이프사이클 콜백 (서브클래스에서 오버라이드 가능) ──────────
+
+    def on_position_closed(self, ticker: str) -> None:
+        """
+        포지션 종료 시 호출 (매도, 손절, 스케줄 매도 등 모든 경로).
+        내부 추적 상태(peak, 타임컷 연장 등)를 정리한다.
+        기본 구현: 아무것도 하지 않음.
+        """
+
+    def reset_daily(self) -> None:
+        """
+        09:00 스케줄 매도 완료 후 호출. 일별 내부 상태 초기화.
+        기본 구현: 아무것도 하지 않음.
+        """

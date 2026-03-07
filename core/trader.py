@@ -702,6 +702,12 @@ class Trader:
         self.state.remove_position(position.ticker)
         self.state.save()
 
+        # 전략 내부 상태 정리 (peak, 타임컷 연장 등)
+        for _s in self._scenarios:
+            if _s.scenario_id == position.scenario_id:
+                _s.strategy.on_position_closed(position.ticker)
+                break
+
         equity = self.risk.get_total_equity()
         self.state.update_peak_equity(equity)
         self.state.save()
@@ -787,6 +793,10 @@ class Trader:
 
         if reason == "SCHEDULED_09H":
             self.reset_daily_tracker()
+            # 전략 내부 일별 상태 초기화 (peak, 타임컷 연장 등)
+            for _s in self._scenarios:
+                if _s.strategy.requires_scheduled_sell():
+                    _s.strategy.reset_daily()
 
         # ── Obsidian 일보 (스케줄 매도 또는 강제 청산 후) ───────────────────
         if self.obsidian_logger:

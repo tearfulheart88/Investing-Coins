@@ -115,9 +115,12 @@ STRATEGY_PARAMS: dict = {
         "ma_period":          15,        # MA 필터 기간
         "k_min":              0.3,       # K 클램프 하한 (공격적 진입 방지)
         "k_max":              0.8,       # K 클램프 상한 (지나친 보수 방지)
-        "time_cut_hours":     1.0,       # 타임컷 기준 시간 (4h→1h 강화)
-        "min_momentum_pct":   1.0,       # 타임컷 최소 수익률 기준 (0.5%→1.0% 강화)
+        "time_cut_hours":     2.0,       # v3: 타임컷 기준 시간 (1h→2h 완화)
+        "min_momentum_pct":   0.3,       # v3: 타임컷 최소 수익률 기준 (1.0%→0.3% 완화)
         "vol_mult":           2.5,       # 거래량 급증 배수 (5분봉 기준)
+        "be_trigger_pct":     1.0,       # v3: 본절방어 활성화 기준 (peak PnL ≥ N%)
+        "be_floor_pct":       0.2,       # v3: 본절방어 최소수익률 (SL→진입가+N%)
+        "trail_drop_pct":     0.5,       # v3: 트레일링 — peak에서 N% 하락시 청산
     },
     "mr_rsi": {
         "rsi_buy":            35.0,      # RSI 과매도 매수 기준 (추세장)

@@ -115,6 +115,7 @@ class PaperEngine:
                     indicators = {}
                 trade = account.execute_sell(ticker, price, "STOP_LIQUIDATION", indicators)
                 if trade:
+                    scenario.strategy.on_position_closed(ticker)
                     logger.info(
                         f"[{account.account_id}] 정지 청산 | "
                         f"{ticker} | {price:,.0f}원 | PnL={trade.pnl:+,.0f}원"
@@ -225,6 +226,7 @@ class PaperEngine:
                     self._log_obsidian(account.scenario_id, trade)
 
             scenario.reset_daily()
+            scenario.strategy.reset_daily()   # 전략 내부 상태 초기화 (peak, 타임컷 등)
 
             # ── 일보 저장 ──
             if self._obsidian:
@@ -264,6 +266,7 @@ class PaperEngine:
                 indicators = self._get_indicators(ticker, price)
                 trade = account.execute_sell(ticker, price, "손절매", indicators)
                 if trade:
+                    strategy.on_position_closed(ticker)
                     logger.info(
                         f"[{account.account_id}] 손절 | {ticker} | {price:,.0f}원 | "
                         f"PnL: {trade.pnl:+,.0f}원 ({trade.pnl_pct:+.2f}%)"
@@ -289,6 +292,7 @@ class PaperEngine:
                 indicators = self._get_indicators(ticker, price)
                 trade = account.execute_sell(ticker, price, sell_signal.reason, indicators)
                 if trade:
+                    strategy.on_position_closed(ticker)
                     logger.info(
                         f"[{account.account_id}] 매도신호 | {ticker} | "
                         f"PnL: {trade.pnl:+,.0f}원 ({trade.pnl_pct:+.2f}%)"
