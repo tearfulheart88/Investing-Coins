@@ -746,6 +746,8 @@ class TradingApp(tk.Tk):
             "be_trigger_pct":    tk.DoubleVar(value=p["vb"]["be_trigger_pct"]),
             "be_floor_pct":      tk.DoubleVar(value=p["vb"]["be_floor_pct"]),
             "trail_drop_pct":    tk.DoubleVar(value=p["vb"]["trail_drop_pct"]),
+            "atr_trail_mult":    tk.DoubleVar(value=p["vb"].get("atr_trail_mult", 0.5)),
+            "use_atr_trail":     tk.BooleanVar(value=p["vb"].get("use_atr_trail", True)),
         }
         slider_row("노이즈 기간 (일)",      vb["noise_filter_days"], 3,   14,  1,    "{:.0f}일")
         slider_row("MA 기간",               vb["ma_period"],          5,   50,  1,    "{:.0f}")
@@ -756,7 +758,17 @@ class TradingApp(tk.Tk):
         slider_row("거래량 급증 배수 (5분봉)", vb["vol_mult"],         1.0, 5.0, 0.5,  "×{:.1f}")
         slider_row("본절방어 활성 기준 (%)",  vb["be_trigger_pct"],   0.5, 3.0, 0.1,  "{:.1f}%")
         slider_row("본절방어 최소수익 (%)",   vb["be_floor_pct"],     0.0, 1.0, 0.05, "{:.2f}%")
-        slider_row("트레일링 하락폭 (%)",    vb["trail_drop_pct"],    0.2, 2.0, 0.1,  "{:.1f}%")
+        slider_row("트레일링 최소폭 (%)",    vb["trail_drop_pct"],    0.3, 3.0, 0.1,  "{:.1f}%")
+        slider_row("ATR 트레일 배수",        vb["atr_trail_mult"],    0.2, 1.5, 0.1,  "×{:.1f}")
+        # ATR 적응 트레일링 토글
+        _atr_frm = tk.Frame(inner, bg=C.BG2); _atr_frm.pack(fill="x", padx=10, pady=2)
+        tk.Checkbutton(
+            _atr_frm, text="ATR 적응 트레일링 (변동성 기반 자동 폭 조절)",
+            variable=vb["use_atr_trail"],
+            font=("Arial", 8), fg=C.PEACH, bg=C.BG2,
+            selectcolor=C.BG3, activebackground=C.BG2, activeforeground=C.PEACH,
+            cursor="hand2",
+        ).pack(side="left")
         self._param_vars["vb"] = vb
         reentry_row("vb_noise_filter")
         reentry_row("vb_standard")
@@ -923,6 +935,14 @@ class TradingApp(tk.Tk):
                 val = float(vb["trail_drop_pct"].get())
                 _vbf._TRAIL_DROP_PCT = val
                 config.STRATEGY_PARAMS["vb"]["trail_drop_pct"] = val
+            if "atr_trail_mult" in vb:
+                val = float(vb["atr_trail_mult"].get())
+                _vbf._ATR_TRAIL_MULT = val
+                config.STRATEGY_PARAMS["vb"]["atr_trail_mult"] = val
+            if "use_atr_trail" in vb:
+                val = bool(vb["use_atr_trail"].get())
+                _vbf._USE_ATR_TRAIL = val
+                config.STRATEGY_PARAMS["vb"]["use_atr_trail"] = val
 
             # ── mr_rsi ──
             import strategies.mr_rsi as _mr_rsi

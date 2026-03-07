@@ -1,6 +1,15 @@
 """
-전략: 변동성 돌파 + 노이즈 필터 + 이동평균선 필터 (개선판 v4)
+전략: 변동성 돌파 + 노이즈 필터 + 이동평균선 필터 (개선판 v5)
 시나리오 ID: vb_noise_filter
+
+■ 개선 사항 (v5) — 2026-03-07 Gemini 2차 분석 기반
+  - 파라미터 재조정: vol_mult 2.5→2.0, trail_drop 0.5→1.0%,
+    min_momentum 0.3→0.5%, time_cut 2.0→2.5h
+  - ATR 적응 트레일링: ATR(14,1h)% 기반으로 trail_drop을 동적 설정
+    → 변동성 높을수록 트레일링 폭 자동 확대 (노이즈 조기청산 방지)
+    → 최소값 = _TRAIL_DROP_PCT (config/UI 설정값)
+  - 매수 필터 통계: 필터별 거부 횟수 집계 로깅 (분석/디버깅용)
+  - 매도 사유별 집계: TSL/BE/TC/SCHED 각각 카운트 + PnL 합계
 
 ■ 개선 사항 (v4) — 2026-03-07 Gemini 분석 기반
   - 파라미터 일원화: 모든 상수를 config.STRATEGY_PARAMS["vb"]에서 초기화
@@ -27,7 +36,8 @@
 매도 전략:
   TP  : 익일 09:00 KST 스케줄 매도 (requires_scheduled_sell=True)
   SL  : risk_manager 손절
-  TSL : peak에서 -TRAIL_DROP_PCT% 하락 → 트레일링 청산  (우선순위 1)
+  TSL : peak에서 -effective_trail% 하락 → 트레일링 청산  (우선순위 1)
+        effective_trail = max(trail_drop_pct, ATR_1h% × atr_trail_mult)
   BE  : peak PnL ≥ BE_TRIGGER% → 현재가 ≤ 진입가+BE_FLOOR% → 본절 청산  (우선순위 2)
   TC  : 매수 후 TIME_CUT_HOURS 경과 + 수익률 < MIN_MOMENTUM% → 청산  (우선순위 3)
        (단, 1h봉 MACD+RSI 모멘텀 유지 시 1회 연장)
@@ -37,6 +47,7 @@
   다른 전략 파일 임포트 금지.
 """
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 from data.market_data import MarketData
 from exchange.upbit_client import DataFetchError
@@ -49,23 +60,46 @@ logger = logging.getLogger(__name__)
 _vb = config.STRATEGY_PARAMS.get("vb", {})
 _K_MIN              = _vb.get("k_min",            0.3)
 _K_MAX              = _vb.get("k_max",            0.8)
-_TIME_CUT_HOURS     = _vb.get("time_cut_hours",   2.0)
-_MIN_MOMENTUM_PCT   = _vb.get("min_momentum_pct", 0.3)
-_VOL_MULT           = _vb.get("vol_mult",         2.5)
+_TIME_CUT_HOURS     = _vb.get("time_cut_hours",   2.5)
+_MIN_MOMENTUM_PCT   = _vb.get("min_momentum_pct", 0.5)
+_VOL_MULT           = _vb.get("vol_mult",         2.0)
 _VOL_SMA_PERIOD     = 20
 _BE_TRIGGER_PCT     = _vb.get("be_trigger_pct",   1.0)
 _BE_FLOOR_PCT       = _vb.get("be_floor_pct",     0.2)
-_TRAIL_DROP_PCT     = _vb.get("trail_drop_pct",   0.5)
+_TRAIL_DROP_PCT     = _vb.get("trail_drop_pct",   1.0)
+_USE_ATR_TRAIL      = _vb.get("use_atr_trail",    True)
+_ATR_TRAIL_MULT     = _vb.get("atr_trail_mult",   0.5)
 
 _KST = timezone(timedelta(hours=9))
+_ATR_CACHE_SEC = 300.0   # ATR 캐시 유효시간 (5분)
 
 
 class VBNoiseFilterStrategy(BaseStrategy):
 
     def __init__(self, market_data: MarketData) -> None:
         self._md = market_data
-        self._peaks: dict[str, float] = {}          # ticker → 최고가 (본절방어 + 트레일링)
-        self._time_cut_extended: set[str] = set()    # 타임컷 1회 연장 사용 추적
+        self._peaks: dict[str, float] = {}           # ticker → 최고가 (본절방어 + 트레일링)
+        self._time_cut_extended: set[str] = set()     # 타임컷 1회 연장 사용 추적
+
+        # v5: ATR 기반 동적 트레일링 캐시 — ticker → (effective_trail_pct, timestamp)
+        self._atr_trail_cache: dict[str, tuple[float, float]] = {}
+
+        # v5: 매수 필터 통계 (분석/디버깅용)
+        self._buy_stats: dict[str, int] = {
+            "total":          0,   # should_buy 호출 총 횟수
+            "no_breakout":    0,   # 변동성 돌파 미달
+            "no_uptrend":     0,   # MA 상승추세 미충족
+            "no_volume":      0,   # 거래량 급증 미달
+            "high_proximity": 0,   # 윗꼬리 저항 근접
+            "data_error":     0,   # 데이터 조회 오류
+            "passed":         0,   # 모든 필터 통과 (매수 신호)
+        }
+        # v5: 매도 사유별 통계
+        self._sell_stats: dict[str, dict] = {
+            "TSL":   {"count": 0, "total_pnl": 0.0},
+            "BE":    {"count": 0, "total_pnl": 0.0},
+            "TC":    {"count": 0, "total_pnl": 0.0},
+        }
 
     def get_strategy_id(self) -> str:
         return "volatility_breakout"
@@ -84,15 +118,77 @@ class VBNoiseFilterStrategy(BaseStrategy):
         """
         self._peaks.pop(ticker, None)
         self._time_cut_extended.discard(ticker)
+        self._atr_trail_cache.pop(ticker, None)
 
     def reset_daily(self) -> None:
         """09:00 스케줄 매도 후 일괄 초기화."""
+        # 일별 통계 로깅 (0건이 아닌 경우에만)
+        if self._buy_stats["total"] > 0:
+            logger.info(
+                f"[vb_noise_filter] 일별 매수필터 통계 | "
+                f"총={self._buy_stats['total']} "
+                f"돌파X={self._buy_stats['no_breakout']} "
+                f"추세X={self._buy_stats['no_uptrend']} "
+                f"거래량X={self._buy_stats['no_volume']} "
+                f"고점근접={self._buy_stats['high_proximity']} "
+                f"에러={self._buy_stats['data_error']} "
+                f"통과={self._buy_stats['passed']}"
+            )
+        if any(v["count"] > 0 for v in self._sell_stats.values()):
+            parts = []
+            for key, val in self._sell_stats.items():
+                if val["count"] > 0:
+                    avg = val["total_pnl"] / val["count"]
+                    parts.append(f"{key}={val['count']}건(avg={avg:+.2f}%)")
+            logger.info(f"[vb_noise_filter] 일별 매도사유 통계 | {' '.join(parts)}")
+
         self._peaks.clear()
         self._time_cut_extended.clear()
+        self._atr_trail_cache.clear()
+        # 통계 초기화
+        for k in self._buy_stats:
+            self._buy_stats[k] = 0
+        for v in self._sell_stats.values():
+            v["count"] = 0
+            v["total_pnl"] = 0.0
+
+    # ─── ATR 기반 동적 트레일링 폭 계산 ────────────────────────────────────
+
+    def _get_effective_trail_drop(self, ticker: str) -> float:
+        """
+        ATR(14, 1h) 기반으로 트레일링 폭을 동적으로 결정.
+        effective_trail = max(_TRAIL_DROP_PCT, ATR_1h_pct * 100 * _ATR_TRAIL_MULT)
+
+        ATR 기능 비활성 또는 조회 실패 시 → _TRAIL_DROP_PCT 고정값 반환.
+        결과를 5분간 캐시하여 API 호출 최소화.
+        """
+        if not _USE_ATR_TRAIL:
+            return _TRAIL_DROP_PCT
+
+        now = time.time()
+        cached = self._atr_trail_cache.get(ticker)
+        if cached:
+            val, ts = cached
+            if now - ts < _ATR_CACHE_SEC:
+                return val
+
+        try:
+            _, atr_pct, _ = self._md.compute_atr_pct(ticker, period=14, interval="minute60")
+            atr_trail = atr_pct * 100 * _ATR_TRAIL_MULT
+            effective = max(_TRAIL_DROP_PCT, atr_trail)
+            # 상한 제한: 너무 넓은 trailing은 수익 보호 실패
+            effective = min(effective, 3.0)
+        except Exception:
+            effective = _TRAIL_DROP_PCT
+
+        self._atr_trail_cache[ticker] = (effective, now)
+        return effective
 
     # ─── 매수 ────────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
+        self._buy_stats["total"] += 1
+
         try:
             k_raw            = self._md.compute_noise_filter_k(ticker, days=config.NOISE_FILTER_DAYS)
             k                = max(_K_MIN, min(_K_MAX, k_raw))
@@ -101,6 +197,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
             vol_cur, vol_sma = self._md.compute_volume_sma_intraday(ticker, _VOL_SMA_PERIOD, "minute5")
             df_daily         = self._md.get_ohlcv(ticker, count=3)
         except DataFetchError as e:
+            self._buy_stats["data_error"] += 1
             logger.warning(f"[vb_noise_filter] 데이터 조회 실패, 매수 건너뜀 | {ticker}: {e}")
             return BuySignal(
                 ticker=ticker,
@@ -118,12 +215,15 @@ class VBNoiseFilterStrategy(BaseStrategy):
             reason = "BREAKOUT+MA_FILTER+VOL"
             should = True
         elif breakout and uptrend and not vol_ok:
+            self._buy_stats["no_volume"] += 1
             reason = f"BREAKOUT+MA_NO_VOL({vol_ratio:.2f}x<{_VOL_MULT}x)"
             should = False
         elif breakout and not uptrend:
+            self._buy_stats["no_uptrend"] += 1
             reason = "BREAKOUT_NO_UPTREND"
             should = False
         else:
+            self._buy_stats["no_breakout"] += 1
             reason = "NO_BREAKOUT"
             should = False
 
@@ -134,6 +234,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 if today_high > 0 and current_price < today_high:
                     proximity_pct = (today_high - current_price) / today_high * 100
                     if proximity_pct < 1.0:
+                        self._buy_stats["high_proximity"] += 1
                         should = False
                         reason = (
                             f"HIGH_PROXIMITY({proximity_pct:.2f}%<1%"
@@ -142,11 +243,26 @@ class VBNoiseFilterStrategy(BaseStrategy):
             except Exception as e:
                 logger.debug(f"[vb_noise_filter] 고점 이격도 계산 오류: {e}")
 
+        if should:
+            self._buy_stats["passed"] += 1
+
         logger.debug(
             f"[vb_noise_filter] {ticker} | price={current_price:,.0f} "
             f"target={target_price:,.0f} ma={ma:,.0f} "
             f"k={k:.3f}(raw={k_raw:.3f}) vol={vol_ratio:.2f}x → {reason}"
         )
+
+        # 주기적 통계 출력 (50회마다)
+        if self._buy_stats["total"] % 50 == 0:
+            logger.info(
+                f"[vb_noise_filter] 매수필터 중간집계 | "
+                f"총={self._buy_stats['total']} "
+                f"통과={self._buy_stats['passed']} "
+                f"돌파X={self._buy_stats['no_breakout']} "
+                f"추세X={self._buy_stats['no_uptrend']} "
+                f"거래량X={self._buy_stats['no_volume']} "
+                f"고점={self._buy_stats['high_proximity']}"
+            )
 
         return BuySignal(
             ticker=ticker,
@@ -178,19 +294,25 @@ class VBNoiseFilterStrategy(BaseStrategy):
 
         peak_pnl_pct = (peak - entry) / entry * 100
 
-        # ── [1순위] 트레일링: peak에서 TRAIL_DROP_PCT 이상 하락 시 청산 ──────
+        # ── ATR 적응 트레일링 폭 (v5) ─────────────────────────────────────
+        effective_trail = self._get_effective_trail_drop(ticker)
+
+        # ── [1순위] 트레일링: peak에서 effective_trail 이상 하락 시 청산 ──────
         if peak_pnl_pct >= _BE_TRIGGER_PCT:
             drop_from_peak = (peak - current_price) / peak * 100
-            if drop_from_peak >= _TRAIL_DROP_PCT:
+            if drop_from_peak >= effective_trail:
                 reason = (
                     f"TRAIL_DROP(peak={peak_pnl_pct:+.2f}%"
-                    f"|drop={drop_from_peak:.2f}%>={_TRAIL_DROP_PCT}%"
+                    f"|drop={drop_from_peak:.2f}%>={effective_trail:.2f}%"
                     f"|pnl={pnl_pct:+.2f}%)"
                 )
                 logger.info(
                     f"[vb_noise_filter] ★ 트레일링 청산 | {ticker} | "
-                    f"entry={entry:,.0f} peak={peak:,.0f} now={current_price:,.0f} | {reason}"
+                    f"entry={entry:,.0f} peak={peak:,.0f} now={current_price:,.0f} "
+                    f"trail={effective_trail:.2f}% | {reason}"
                 )
+                self._sell_stats["TSL"]["count"] += 1
+                self._sell_stats["TSL"]["total_pnl"] += pnl_pct
                 self.on_position_closed(ticker)
                 return SellSignal(ticker, True, current_price, reason)
 
@@ -207,6 +329,8 @@ class VBNoiseFilterStrategy(BaseStrategy):
                     f"[vb_noise_filter] ★ 본절방어 청산 | {ticker} | "
                     f"entry={entry:,.0f} peak={peak:,.0f} now={current_price:,.0f} | {reason}"
                 )
+                self._sell_stats["BE"]["count"] += 1
+                self._sell_stats["BE"]["total_pnl"] += pnl_pct
                 self.on_position_closed(ticker)
                 return SellSignal(ticker, True, current_price, reason)
 
@@ -236,10 +360,10 @@ class VBNoiseFilterStrategy(BaseStrategy):
                     if momentum_alive:
                         self._time_cut_extended.add(ticker)
                         logger.info(
-                            f"[vb_noise_filter] ⏱ 타임컷 연장 | {ticker} | "
+                            f"[vb_noise_filter] 타임컷 연장 | {ticker} | "
                             f"pnl={pnl_pct:+.2f}% elapsed={elapsed_hours:.1f}h | "
                             f"MACD_1H={macd_hist_val:.4f} RSI_1H={rsi_val:.1f} "
-                            f"→ 모멘텀 유지, 1회 바이패스"
+                            f"-> 모멘텀 유지, 1회 바이패스"
                         )
                         # 연장 — 이번 사이클 보유 유지
                     else:
@@ -249,9 +373,11 @@ class VBNoiseFilterStrategy(BaseStrategy):
                             f"|MACD={macd_hist_val:.4f}|RSI={rsi_val:.1f})"
                         )
                         logger.info(
-                            f"[vb_noise_filter] ⏱ 타임컷 청산 | {ticker} | "
+                            f"[vb_noise_filter] 타임컷 청산 | {ticker} | "
                             f"entry={entry:,.0f} now={current_price:,.0f} | {reason}"
                         )
+                        self._sell_stats["TC"]["count"] += 1
+                        self._sell_stats["TC"]["total_pnl"] += pnl_pct
                         self.on_position_closed(ticker)
                         return SellSignal(ticker, True, current_price, reason)
                 else:
@@ -259,12 +385,14 @@ class VBNoiseFilterStrategy(BaseStrategy):
                     reason = (
                         f"TIME_CUT_FINAL({elapsed_hours:.1f}h"
                         f"|pnl={pnl_pct:+.2f}%<{_MIN_MOMENTUM_PCT}%"
-                        f"|연장소진)"
+                        f"|ext_used)"
                     )
                     logger.info(
-                        f"[vb_noise_filter] ⏱ 타임컷 최종청산 | {ticker} | "
+                        f"[vb_noise_filter] 타임컷 최종청산 | {ticker} | "
                         f"entry={entry:,.0f} now={current_price:,.0f} | {reason}"
                     )
+                    self._sell_stats["TC"]["count"] += 1
+                    self._sell_stats["TC"]["total_pnl"] += pnl_pct
                     self.on_position_closed(ticker)
                     return SellSignal(ticker, True, current_price, reason)
         except Exception as e:
