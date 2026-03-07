@@ -45,7 +45,7 @@ class GeminiStrategyAnalyzer:
 
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key
-        self._model_name = "gemini-2.0-flash"   # 빠른 분석용 (2025-12+)
+        self._model_name = "gemini-2.0-flash-lite"  # 무료 티어 지원 경량 모델
         self._base_dir   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # ─── 공개 API ─────────────────────────────────────────────────────────────
