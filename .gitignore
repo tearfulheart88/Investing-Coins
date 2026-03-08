@@ -4,12 +4,16 @@
 !.claude/commands/
 !.claude/commands/*.md
 
-# Environment & Credentials
+# Environment & Credentials — API 키 절대 커밋 금지
 .env
 .env.local
 .env.*.local
 secrets.json
 credentials.json
+# 혹시 모를 키 파일 패턴 추가 차단
+*api_key*
+*apikey*
+*secret_key*
 
 # Python
 __pycache__/
