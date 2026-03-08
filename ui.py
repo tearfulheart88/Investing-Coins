@@ -733,6 +733,29 @@ class TradingApp(tk.Tk):
                 cursor="hand2",
             ).pack(side="left")
 
+        # ── 재진입 일괄 선택/해제 ──
+        section("◆  수익 재진입 일괄 설정")
+        _re_btn_frm = tk.Frame(inner, bg=C.BG2)
+        _re_btn_frm.pack(fill="x", padx=8, pady=(4, 8))
+
+        def _toggle_all_reentry():
+            all_on = all(v.get() for v in self._reentry_vars.values())
+            for var in self._reentry_vars.values():
+                var.set(not all_on)
+
+        tk.Button(
+            _re_btn_frm,
+            text="전체 선택 / 전체 해제",
+            command=_toggle_all_reentry,
+            font=("Arial", 9, "bold"), bg=C.ACCENT, fg=C.HEADER,
+            relief="flat", padx=12, pady=4, cursor="hand2",
+        ).pack(side="left")
+        tk.Label(
+            _re_btn_frm,
+            text="수익 구간 매도 신호 발생 시 포지션 청산 없이 단가 갱신",
+            font=("Arial", 8), fg=C.SUB, bg=C.BG2,
+        ).pack(side="left", padx=8)
+
         # ── VB 변동성돌파 (공통) ──
         section("▶  VB 변동성돌파 (공통)")
         vb = {

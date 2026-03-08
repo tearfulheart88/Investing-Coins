@@ -164,10 +164,31 @@ class GeminiStrategyAnalyzer:
         max_trades: int,
         session_id: Optional[str],
     ) -> list[dict]:
-        """trades.jsonl에서 해당 시나리오의 최근 거래 기록 로드."""
+        """
+        거래 기록 로드 — 우선순위:
+          1) logs/analysis/ 폴더 (가장 최근 세션 로그)  ← 정지 후 저장되는 파일
+          2) trades.jsonl 폴백 (실거래 누적 JSONL)
+        """
+        # ── [1순위] 분석 로그 폴더에서 최신 세션 로드 ────────────────────────
+        if not session_id:  # 세션 ID 지정 없을 때만 (지정 시 JSONL 사용)
+            try:
+                from logging_.session_log_writer import load_latest_session_log
+                session_trades = load_latest_session_log(scenario_id, max_trades)
+                if session_trades:
+                    logger.info(
+                        f"[GeminiAnalyzer] 분석 로그 폴더에서 로드 | "
+                        f"scenario={scenario_id} | {len(session_trades)}건"
+                    )
+                    return session_trades
+            except Exception as e:
+                logger.warning(f"[GeminiAnalyzer] 분석 로그 폴더 로드 실패: {e}")
+
+        # ── [2순위] trades.jsonl 폴백 ─────────────────────────────────────────
         jsonl_path = config.TRADES_JSON_PATH.replace(".json", ".jsonl")
         if not os.path.exists(jsonl_path):
-            logger.warning("[GeminiAnalyzer] trades.jsonl 없음")
+            logger.warning(
+                "[GeminiAnalyzer] trades.jsonl 없음 — 거래 정지 후 다시 분석하세요."
+            )
             return []
 
         try:
@@ -193,7 +214,10 @@ class GeminiStrategyAnalyzer:
                         continue
                     records.append(rec)
 
-            # 최신 max_trades건만
+            logger.info(
+                f"[GeminiAnalyzer] trades.jsonl에서 로드 | "
+                f"scenario={scenario_id} | {len(records[-max_trades:])}건"
+            )
             return records[-max_trades:]
 
         except Exception as e:

@@ -76,7 +76,7 @@ DEFAULT_WEIGHT_PCT: float = 100.0              # 단일 전략 시 계좌 전체
 # ─── 가상거래 시나리오 기본값 ──────────────────────────────────────────────────
 PAPER_TOTAL_BUDGET: int = 900_000              # 전체 가상거래 예산 (9시나리오 × 100,000)
 PAPER_DEFAULT_BALANCE: int = 100_000           # 시나리오별 기본 초기자금 (KRW)
-PAPER_DEFAULT_BUDGET_PCT: float = 30.0         # 시나리오 잔고의 30%를 1회 거래에 사용
+PAPER_DEFAULT_BUDGET_PCT: float = 50.0         # 시나리오 잔고의 50%를 1회 거래에 사용
 PAPER_DEFAULT_TICKER_COUNT: int = 10           # 시나리오별 기본 종목 수
 PAPER_TICKER_COUNT_OPTIONS: list = [3, 5, 10, 30, 50, 100]
 
@@ -183,4 +183,14 @@ GEMINI_MAX_TRADES: int = 50              # 분석에 사용할 최근 거래 수
 # REENTRY_ENABLED_SCENARIOS: 재진입을 활성화할 시나리오 ID 집합
 #   예) {"vb_noise_filter", "mr_rsi"}
 #       빈 set() = 전체 비활성화
-REENTRY_ENABLED_SCENARIOS: set = set()  # UI 또는 직접 편집으로 활성화
+REENTRY_ENABLED_SCENARIOS: set = {      # 기본값: 전체 전략 활성화
+    "vb_noise_filter",
+    "vb_standard",
+    "mr_rsi",
+    "mr_bollinger",
+    "scalping_triple_ema",
+    "scalping_bb_rsi",
+    "scalping_5ema_reversal",
+    "macd_rsi_trend",
+    "smrh_stop",
+}

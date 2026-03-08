@@ -396,7 +396,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
                     self.on_position_closed(ticker)
                     return SellSignal(ticker, True, current_price, reason)
         except Exception as e:
-            logger.debug(f"[vb_noise_filter] time-cut 계산 오류: {e}")
+            logger.warning(f"[vb_noise_filter] time-cut 계산 오류: {e}")
 
         # VB 전략은 기본적으로 스케줄(09:00) 또는 손절로만 매도
         return SellSignal(ticker, False, current_price, "")

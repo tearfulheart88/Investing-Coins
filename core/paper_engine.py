@@ -148,6 +148,22 @@ class PaperEngine:
                         f"Obsidian 일보 실패 [{scenario.account.account_id}]: {e}"
                     )
 
+        # ── Gemini 분석용 세션 로그 저장 (시나리오별) ───────────────────────────
+        try:
+            from logging_.session_log_writer import paper_trade_to_dict, save_session_log
+            for _scen in self._scenarios:
+                _acct = _scen.account
+                _trade_dicts = [paper_trade_to_dict(t) for t in _acct.trade_history]
+                _summary = _acct.get_summary(prices)
+                save_session_log(
+                    scenario_id=_acct.scenario_id,
+                    trades=_trade_dicts,
+                    summary=_summary,
+                    is_paper=True,
+                )
+        except Exception as _e:
+            logger.warning(f"Gemini 분석 로그 저장 실패 (paper): {_e}")
+
         self._stop_event.set()
         self.running = False
         if self._thread:

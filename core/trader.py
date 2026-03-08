@@ -260,6 +260,20 @@ class Trader:
         except Exception as e:
             logger.warning(f"세션 로깅 종료 실패: {e}")
 
+        # ── Gemini 분석용 세션 로그 저장 ──────────────────────────────────────
+        try:
+            from logging_.session_log_writer import paper_trade_to_dict, save_session_log
+            trade_dicts = [paper_trade_to_dict(t) for t in self._obs_session_trades]
+            equity_now  = self.risk.get_total_equity()
+            save_session_log(
+                scenario_id=self.strategy.get_scenario_id(),
+                trades=trade_dicts,
+                summary=self._build_obs_summary(equity_now),
+                is_paper=False,
+            )
+        except Exception as _e:
+            logger.warning(f"Gemini 분석 로그 저장 실패: {_e}")
+
         # ── Obsidian 세션 종료 + 일보 저장 ──────────────────────────────────
         if self.obsidian_logger:
             try:
