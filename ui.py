@@ -771,6 +771,8 @@ class TradingApp(tk.Tk):
             "trail_drop_pct":    tk.DoubleVar(value=p["vb"]["trail_drop_pct"]),
             "atr_trail_mult":    tk.DoubleVar(value=p["vb"].get("atr_trail_mult", 0.5)),
             "use_atr_trail":     tk.BooleanVar(value=p["vb"].get("use_atr_trail", True)),
+            "adx_min_vb":        tk.DoubleVar(value=p["vb"].get("adx_min_vb", 15.0)),
+            "ema200_filter":     tk.BooleanVar(value=p["vb"].get("ema200_filter", True)),
         }
         slider_row("노이즈 기간 (일)",      vb["noise_filter_days"], 3,   14,  1,    "{:.0f}일")
         slider_row("MA 기간",               vb["ma_period"],          5,   50,  1,    "{:.0f}")
@@ -783,11 +785,20 @@ class TradingApp(tk.Tk):
         slider_row("본절방어 최소수익 (%)",   vb["be_floor_pct"],     0.0, 1.0, 0.05, "{:.2f}%")
         slider_row("트레일링 최소폭 (%)",    vb["trail_drop_pct"],    0.3, 3.0, 0.1,  "{:.1f}%")
         slider_row("ATR 트레일 배수",        vb["atr_trail_mult"],    0.2, 1.5, 0.1,  "×{:.1f}")
-        # ATR 적응 트레일링 토글
-        _atr_frm = tk.Frame(inner, bg=C.BG2); _atr_frm.pack(fill="x", padx=10, pady=2)
+        slider_row("ADX 최소 추세강도 (0=비활)", vb["adx_min_vb"],    0.0, 40.0, 1.0, "ADX≥{:.0f}")
+        # 토글 영역 (ATR 적응 트레일링 + EMA200 필터)
+        _toggle_frm = tk.Frame(inner, bg=C.BG2); _toggle_frm.pack(fill="x", padx=10, pady=2)
         tk.Checkbutton(
-            _atr_frm, text="ATR 적응 트레일링 (변동성 기반 자동 폭 조절)",
+            _toggle_frm, text="ATR 적응 트레일링 (변동성 기반 자동 폭 조절)",
             variable=vb["use_atr_trail"],
+            font=("Arial", 8), fg=C.PEACH, bg=C.BG2,
+            selectcolor=C.BG3, activebackground=C.BG2, activeforeground=C.PEACH,
+            cursor="hand2",
+        ).pack(side="left")
+        _ema_frm = tk.Frame(inner, bg=C.BG2); _ema_frm.pack(fill="x", padx=10, pady=2)
+        tk.Checkbutton(
+            _ema_frm, text="EMA200(4h) 장기 추세 필터 (하락 추세 매수 제외)",
+            variable=vb["ema200_filter"],
             font=("Arial", 8), fg=C.PEACH, bg=C.BG2,
             selectcolor=C.BG3, activebackground=C.BG2, activeforeground=C.PEACH,
             cursor="hand2",
@@ -966,6 +977,14 @@ class TradingApp(tk.Tk):
                 val = bool(vb["use_atr_trail"].get())
                 _vbf._USE_ATR_TRAIL = val
                 config.STRATEGY_PARAMS["vb"]["use_atr_trail"] = val
+            if "adx_min_vb" in vb:
+                val = float(vb["adx_min_vb"].get())
+                _vbf._ADX_MIN_VB = val
+                config.STRATEGY_PARAMS["vb"]["adx_min_vb"] = val
+            if "ema200_filter" in vb:
+                val = bool(vb["ema200_filter"].get())
+                _vbf._EMA200_FILTER = val
+                config.STRATEGY_PARAMS["vb"]["ema200_filter"] = val
 
             # ── mr_rsi ──
             import strategies.mr_rsi as _mr_rsi

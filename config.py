@@ -123,6 +123,8 @@ STRATEGY_PARAMS: dict = {
         "trail_drop_pct":     1.0,       # v5: 0.5→1.0% (노이즈 조기청산 방지, ATR 적응)
         "use_atr_trail":      True,      # v5: ATR 기반 동적 트레일링 활성화
         "atr_trail_mult":     0.5,       # v5: ATR%의 N배를 trail 폭으로 (최소=trail_drop_pct)
+        "ema200_filter":      True,      # v6: EMA200(4h) 장기 추세 필터 (하락 추세 제외)
+        "adx_min_vb":         15.0,      # v6: ADX 최소 추세 강도 (0=비활성, VB 횡보 필터)
     },
     "mr_rsi": {
         "rsi_buy":            35.0,      # RSI 과매도 매수 기준 (추세장)

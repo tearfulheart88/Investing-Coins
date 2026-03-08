@@ -1,6 +1,14 @@
 """
-전략: 변동성 돌파 + 노이즈 필터 + 이동평균선 필터 (개선판 v5)
+전략: 변동성 돌파 + 노이즈 필터 + 이동평균선 필터 (개선판 v6)
 시나리오 ID: vb_noise_filter
+
+■ 개선 사항 (v6) — 2026-03-08
+  - EMA200(4h) 장기 추세 필터 추가: 현재가 < EMA200(4h) 시 하락 추세로 판단, 매수 제외
+    → MR 전략과 동일한 장기 추세 기준 적용 (신규 상장 등 데이터 부족 시 우회)
+    → EMA200 결과를 30분 캐시하여 API 호출 최소화
+  - ADX(1h) 횡보 필터 추가: ADX < adx_min_vb(기본 15) 시 횡보 구간 → 가짜 돌파 위험 → 매수 제외
+    → 데이터 부족 시 우회 (신규 상장 코인 보호)
+  - 매수 필터 통계에 below_ema200, low_adx 항목 추가
 
 ■ 개선 사항 (v5) — 2026-03-07 Gemini 2차 분석 기반
   - 파라미터 재조정: vol_mult 2.5→2.0, trail_drop 0.5→1.0%,
@@ -28,10 +36,12 @@
   3. datetime 타입 가드: position.buy_time이 str 또는 datetime 모두 처리
 
 매수 조건 (AND):
-  1. current_price >= today_open + yesterday_range * k  (변동성 돌파)
-  2. current_price > MA(15)                             (상승 추세 확인)
-  3. vol_cur_5m >= vol_sma_5m × VOL_MULT               (거래량 급증 확인)
-  4. 당일 고가 이격도 >= 1%                              (윗꼬리 저항 회피)
+  1. current_price >= EMA200(4h)                        (장기 상승 추세 확인)  ← v6 신규
+  2. ADX(1h) >= adx_min_vb (기본 15)                   (최소 추세 강도 확인)  ← v6 신규
+  3. current_price >= today_open + yesterday_range * k  (변동성 돌파)
+  4. current_price > MA(15)                             (단기 상승 추세 확인)
+  5. vol_cur_5m >= vol_sma_5m × VOL_MULT               (거래량 급증 확인)
+  6. 당일 고가 이격도 >= 1%                              (윗꼬리 저항 회피)
 
 매도 전략:
   TP  : 익일 09:00 KST 스케줄 매도 (requires_scheduled_sell=True)
@@ -69,9 +79,12 @@ _BE_FLOOR_PCT       = _vb.get("be_floor_pct",     0.2)
 _TRAIL_DROP_PCT     = _vb.get("trail_drop_pct",   1.0)
 _USE_ATR_TRAIL      = _vb.get("use_atr_trail",    True)
 _ATR_TRAIL_MULT     = _vb.get("atr_trail_mult",   0.5)
+_EMA200_FILTER      = _vb.get("ema200_filter",    True)   # v6: EMA200(4h) 장기 추세 필터
+_ADX_MIN_VB         = _vb.get("adx_min_vb",       15.0)   # v6: ADX 최소 추세 강도 (0=비활성)
 
 _KST = timezone(timedelta(hours=9))
-_ATR_CACHE_SEC = 300.0   # ATR 캐시 유효시간 (5분)
+_ATR_CACHE_SEC   = 300.0    # ATR 캐시 유효시간 (5분)
+_EMA200_CACHE_SEC = 1800.0  # EMA200(4h) 캐시 유효시간 (30분, 4h봉 기준 변동 느림)
 
 
 class VBNoiseFilterStrategy(BaseStrategy):
@@ -83,10 +96,14 @@ class VBNoiseFilterStrategy(BaseStrategy):
 
         # v5: ATR 기반 동적 트레일링 캐시 — ticker → (effective_trail_pct, timestamp)
         self._atr_trail_cache: dict[str, tuple[float, float]] = {}
+        # v6: EMA200(4h) 캐시 — ticker → (ema200_value, timestamp)
+        self._ema200_cache: dict[str, tuple[float, float]] = {}
 
         # v5: 매수 필터 통계 (분석/디버깅용)
         self._buy_stats: dict[str, int] = {
             "total":          0,   # should_buy 호출 총 횟수
+            "below_ema200":   0,   # v6: EMA200(4h) 하락 추세 제외
+            "low_adx":        0,   # v6: ADX 낮음 (횡보 필터)
             "no_breakout":    0,   # 변동성 돌파 미달
             "no_uptrend":     0,   # MA 상승추세 미충족
             "no_volume":      0,   # 거래량 급증 미달
@@ -119,6 +136,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
         self._peaks.pop(ticker, None)
         self._time_cut_extended.discard(ticker)
         self._atr_trail_cache.pop(ticker, None)
+        self._ema200_cache.pop(ticker, None)
 
     def reset_daily(self) -> None:
         """09:00 스케줄 매도 후 일괄 초기화."""
@@ -127,6 +145,8 @@ class VBNoiseFilterStrategy(BaseStrategy):
             logger.info(
                 f"[vb_noise_filter] 일별 매수필터 통계 | "
                 f"총={self._buy_stats['total']} "
+                f"EMA200X={self._buy_stats['below_ema200']} "
+                f"ADXX={self._buy_stats['low_adx']} "
                 f"돌파X={self._buy_stats['no_breakout']} "
                 f"추세X={self._buy_stats['no_uptrend']} "
                 f"거래량X={self._buy_stats['no_volume']} "
@@ -145,6 +165,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
         self._peaks.clear()
         self._time_cut_extended.clear()
         self._atr_trail_cache.clear()
+        self._ema200_cache.clear()
         # 통계 초기화
         for k in self._buy_stats:
             self._buy_stats[k] = 0
@@ -206,6 +227,41 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 reason="DATA_ERROR",
             )
 
+        # ── [v6] EMA200(4h) 장기 추세 필터 ──────────────────────────────────
+        # 현재가 < EMA200(4h) → 장기 하락 추세 → 매수 제외
+        # 데이터 부족(신규 상장 등) 시 필터 우회 (30분 캐시)
+        ema200_4h: float | None = None
+        if _EMA200_FILTER:
+            now_ts = time.time()
+            cached_ema = self._ema200_cache.get(ticker)
+            if cached_ema and now_ts - cached_ema[1] < _EMA200_CACHE_SEC:
+                ema200_4h = cached_ema[0]
+            else:
+                try:
+                    ema200_4h = self._md.compute_ema_intraday(ticker, 200, "minute240")
+                    self._ema200_cache[ticker] = (ema200_4h, now_ts)
+                except Exception:
+                    pass  # 데이터 부족 → 필터 우회
+
+        if ema200_4h is not None and current_price < ema200_4h:
+            self._buy_stats["below_ema200"] += 1
+            reason = f"BELOW_EMA200_4H({current_price:,.0f}<{ema200_4h:,.0f})"
+            logger.info(f"[vb_noise_filter] {ticker} EMA200(4h) 하락 추세 제외 | {reason}")
+            return BuySignal(
+                ticker=ticker, should_buy=False,
+                current_price=current_price, reason=reason,
+            )
+
+        # ── [v6] ADX(1h) 추세 강도 확인 (데이터 부족 시 우회) ──────────────
+        # ADX < adx_min_vb → 횡보 구간 → 가짜 돌파 위험 → 매수 제외
+        adx_1h: float | None = None
+        if _ADX_MIN_VB > 0:
+            try:
+                adx_1h = self._md.compute_adx(ticker, 14, "minute60")
+            except Exception:
+                pass  # 데이터 부족 → 필터 우회
+
+        # ── 변동성 돌파 + MA 단기 추세 + 거래량 판정 ─────────────────────────
         breakout  = current_price >= target_price
         uptrend   = current_price > ma
         vol_ratio = vol_cur / vol_sma if vol_sma > 0 else 0.0
@@ -227,6 +283,12 @@ class VBNoiseFilterStrategy(BaseStrategy):
             reason = "NO_BREAKOUT"
             should = False
 
+        # ── ADX 횡보 필터: 너무 낮으면 가짜 돌파 위험 ───────────────────────
+        if should and adx_1h is not None and adx_1h < _ADX_MIN_VB:
+            self._buy_stats["low_adx"] += 1
+            reason = f"ADX_TOO_LOW({adx_1h:.1f}<{_ADX_MIN_VB:.0f})"
+            should = False
+
         # ── 고점 이격도 필터: 당일 고가 아래 1% 이내 → 윗꼬리 저항 회피 ────
         if should and not df_daily.empty:
             try:
@@ -246,10 +308,13 @@ class VBNoiseFilterStrategy(BaseStrategy):
         if should:
             self._buy_stats["passed"] += 1
 
+        ema_str = f"{ema200_4h:,.0f}" if ema200_4h is not None else "N/A"
+        adx_str = f"{adx_1h:.1f}" if adx_1h is not None else "N/A"
         logger.debug(
             f"[vb_noise_filter] {ticker} | price={current_price:,.0f} "
             f"target={target_price:,.0f} ma={ma:,.0f} "
-            f"k={k:.3f}(raw={k_raw:.3f}) vol={vol_ratio:.2f}x → {reason}"
+            f"k={k:.3f}(raw={k_raw:.3f}) vol={vol_ratio:.2f}x "
+            f"ema200_4h={ema_str} adx_1h={adx_str} → {reason}"
         )
 
         # 주기적 통계 출력 (50회마다)
@@ -258,6 +323,8 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 f"[vb_noise_filter] 매수필터 중간집계 | "
                 f"총={self._buy_stats['total']} "
                 f"통과={self._buy_stats['passed']} "
+                f"EMA200X={self._buy_stats['below_ema200']} "
+                f"ADXX={self._buy_stats['low_adx']} "
                 f"돌파X={self._buy_stats['no_breakout']} "
                 f"추세X={self._buy_stats['no_uptrend']} "
                 f"거래량X={self._buy_stats['no_volume']} "
@@ -275,6 +342,8 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 "target_price": round(target_price, 0),
                 "ma_15": round(ma, 0),
                 "vol_ratio": round(vol_ratio, 2),
+                "ema200_4h": round(ema200_4h, 0) if ema200_4h is not None else None,
+                "adx_1h": round(adx_1h, 1) if adx_1h is not None else None,
             },
         )
 
