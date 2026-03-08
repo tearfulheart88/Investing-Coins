@@ -606,6 +606,9 @@ class TradingApp(tk.Tk):
             self._paper_rows.append(row)
             self._render_paper_row(row)
 
+        # 전체 예산 = 현재 전략 수 × 10만원 (전략 추가/삭제 시 항상 맞게 자동 계산)
+        self._paper_total_budget_var.set(f"{len(self._paper_rows) * 100_000:,}")
+
         # ── 하단: 추가/삭제 버튼 ──
         bf = tk.Frame(parent, bg=C.BG2)
         bf.pack(fill="x", padx=8, pady=(0, 6))

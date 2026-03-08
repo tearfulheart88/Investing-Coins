@@ -74,7 +74,7 @@ BUDGET_PER_TRADE_PCT: float = 30.0             # 시나리오 자금의 30%를 1
 DEFAULT_WEIGHT_PCT: float = 100.0              # 단일 전략 시 계좌 전체 사용
 
 # ─── 가상거래 시나리오 기본값 ──────────────────────────────────────────────────
-PAPER_TOTAL_BUDGET: int = 900_000              # 전체 가상거래 예산 (9시나리오 × 100,000)
+PAPER_TOTAL_BUDGET: int = 1_000_000            # 전체 가상거래 예산 (전략 수 × 100,000 — UI에서 자동 갱신)
 PAPER_DEFAULT_BALANCE: int = 100_000           # 시나리오별 기본 초기자금 (KRW)
 PAPER_DEFAULT_BUDGET_PCT: float = 50.0         # 시나리오 잔고의 50%를 1회 거래에 사용
 PAPER_DEFAULT_TICKER_COUNT: int = 10           # 시나리오별 기본 종목 수
