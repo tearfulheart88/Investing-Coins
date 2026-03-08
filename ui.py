@@ -37,6 +37,7 @@ STRATEGIES = {
     "scalping_triple_ema    │  삼중EMA 눌림목 (1분봉)": ("scalping",            "scalping_triple_ema"),
     "scalping_bb_rsi        │  BB+RSI 스캘핑 (15분봉)": ("scalping",            "scalping_bb_rsi"),
     "scalping_5ema_reversal │  5EMA 반전 Long (5분봉)":  ("scalping",            "scalping_5ema_reversal"),
+    "pump_catcher           │  거래량 폭발 펌핑 스캘핑 (1분봉)": ("scalping",       "pump_catcher"),
     "macd_rsi_trend         │  MACD 골든크로스(제로하) + RSI 추세추종 (1시간봉)": ("trend_following", "macd_rsi_trend"),
     "smrh_stop              │  SMRH 스탑매매 HA돌파 (4h+30m 멀티타임프레임)": ("trend_following", "smrh_stop"),
 }
@@ -924,6 +925,38 @@ class TradingApp(tk.Tk):
         self._param_vars["smrh_stop"] = smrh
         reentry_row("smrh_stop")
 
+        # ── pump_catcher ──
+        section("▶  거래량 폭발 펌핑 (pump_catcher)")
+        pc_p = p.get("pump_catcher", {})
+        pc = {
+            "vol_mult":           tk.DoubleVar(value=pc_p.get("vol_mult",             15.0)),
+            "spike_pct":          tk.DoubleVar(value=pc_p.get("spike_pct",             3.0)),
+            "max_gain_from_open": tk.DoubleVar(value=pc_p.get("max_gain_from_open",   15.0)),
+            "min_body_ratio":     tk.DoubleVar(value=pc_p.get("min_body_ratio",        0.5)),
+            "rsi_max":            tk.DoubleVar(value=pc_p.get("rsi_max",              85.0)),
+            "trail_pct":          tk.DoubleVar(value=pc_p.get("trail_pct",             2.0)),
+            "hard_sl_pct":        tk.DoubleVar(value=pc_p.get("hard_sl_pct",           3.0)),
+            "tp_lock_pct":        tk.DoubleVar(value=pc_p.get("tp_lock_pct",           5.0)),
+            "trail_locked_pct":   tk.DoubleVar(value=pc_p.get("trail_locked_pct",      1.0)),
+            "vol_fade_mult":      tk.DoubleVar(value=pc_p.get("vol_fade_mult",         2.0)),
+            "max_hold_minutes":   tk.DoubleVar(value=pc_p.get("max_hold_minutes",     10.0)),
+            "cooldown_minutes":   tk.DoubleVar(value=pc_p.get("cooldown_minutes",     30.0)),
+        }
+        slider_row("거래량 폭발 배수 (SMA×N)",  pc["vol_mult"],            5.0, 30.0,  1.0, "×{:.0f}")
+        slider_row("양봉 최소 급등률 (%)",       pc["spike_pct"],           1.0,  8.0,  0.5, "{:.1f}%")
+        slider_row("일봉 시가 대비 최대 상승 (%)", pc["max_gain_from_open"], 5.0, 30.0,  1.0, "{:.0f}%")
+        slider_row("양봉 몸통 비율 하한",        pc["min_body_ratio"],      0.2,  0.9,  0.05, "{:.2f}")
+        slider_row("RSI 과열 기준",             pc["rsi_max"],            70.0, 95.0,  1.0, "RSI≤{:.0f}")
+        slider_row("트레일링 스탑 (%)",          pc["trail_pct"],           0.5,  5.0,  0.5, "{:.1f}%")
+        slider_row("하드 손절 (%)",             pc["hard_sl_pct"],         1.0,  8.0,  0.5, "{:.1f}%")
+        slider_row("수익 보존 발동 기준 (%)",    pc["tp_lock_pct"],         2.0, 15.0,  0.5, "{:.1f}%")
+        slider_row("수익 보존 후 트레일 (%)",    pc["trail_locked_pct"],    0.3,  3.0,  0.1, "{:.1f}%")
+        slider_row("거래량 소멸 기준 (SMA×N)",  pc["vol_fade_mult"],       1.0,  5.0,  0.5, "×{:.1f}")
+        slider_row("최대 보유 시간 (분)",        pc["max_hold_minutes"],    3.0, 30.0,  1.0, "{:.0f}분")
+        slider_row("재진입 쿨다운 (분)",         pc["cooldown_minutes"],    5.0, 120.0, 5.0, "{:.0f}분")
+        self._param_vars["pump_catcher"] = pc
+        reentry_row("pump_catcher")
+
         # 여백
         tk.Frame(inner, bg=C.BG2, height=12).pack()
 
@@ -1044,6 +1077,22 @@ class TradingApp(tk.Tk):
             smrh = p.get("smrh_stop", {})
             if "rsi_min"     in smrh: _smrh._RSI_MIN     = float(smrh["rsi_min"].get())
             if "macd_signal" in smrh: _smrh._MACD_SIGNAL = int(smrh["macd_signal"].get())
+
+            # ── pump_catcher ──
+            import strategies.pump_catcher as _pc
+            pc = p.get("pump_catcher", {})
+            if "vol_mult"           in pc: _pc._VOL_MULT          = float(pc["vol_mult"].get())
+            if "spike_pct"          in pc: _pc._SPIKE_PCT         = float(pc["spike_pct"].get())
+            if "max_gain_from_open" in pc: _pc._MAX_GAIN_OPEN_PCT = float(pc["max_gain_from_open"].get())
+            if "min_body_ratio"     in pc: _pc._MIN_BODY_RATIO    = float(pc["min_body_ratio"].get())
+            if "rsi_max"            in pc: _pc._RSI_MAX           = float(pc["rsi_max"].get())
+            if "trail_pct"          in pc: _pc._TRAIL_PCT         = float(pc["trail_pct"].get())
+            if "hard_sl_pct"        in pc: _pc._HARD_SL_PCT       = float(pc["hard_sl_pct"].get())
+            if "tp_lock_pct"        in pc: _pc._TP_LOCK_PCT       = float(pc["tp_lock_pct"].get())
+            if "trail_locked_pct"   in pc: _pc._TRAIL_LOCKED_PCT  = float(pc["trail_locked_pct"].get())
+            if "vol_fade_mult"      in pc: _pc._VOL_FADE_MULT     = float(pc["vol_fade_mult"].get())
+            if "max_hold_minutes"   in pc: _pc._MAX_HOLD_MIN      = float(pc["max_hold_minutes"].get())
+            if "cooldown_minutes"   in pc: _pc._COOLDOWN_MIN      = float(pc["cooldown_minutes"].get())
 
             log.info(
                 f"[파라미터 적용] "

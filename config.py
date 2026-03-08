@@ -172,6 +172,20 @@ STRATEGY_PARAMS: dict = {
         "rsi_min":      50.0,            # 4h + 30m 공통 RSI 최소 기준
         "macd_signal":  70,              # MACD 시그널 기간 (원본 명세: 70)
     },
+    "pump_catcher": {
+        "vol_mult":             15.0,    # 거래량 폭발 배수 (SMA20 × N배 이상)
+        "spike_pct":             3.0,    # 1분봉 시가 대비 최소 급등률 (%)
+        "max_gain_from_open":   15.0,    # 일봉 시가 대비 최대 허용 상승률 (%)
+        "min_body_ratio":        0.5,    # 양봉 몸통 비율 하한 (설거지 위꼬리 방지)
+        "rsi_max":              85.0,    # RSI 최대 허용값 (과열 방지)
+        "trail_pct":             2.0,    # 기본 트레일링 스탑 (%)
+        "hard_sl_pct":           3.0,    # 하드 손절 (%)
+        "tp_lock_pct":           5.0,    # 수익 보존 강화 발동 기준 (%)
+        "trail_locked_pct":      1.0,    # 수익 보존 후 좁혀진 트레일링 (%)
+        "vol_fade_mult":         2.0,    # 거래량 소멸 판정 기준 배수
+        "max_hold_minutes":     10.0,    # 최대 보유 시간 (분)
+        "cooldown_minutes":     30.0,    # 동일 종목 재진입 쿨다운 (분)
+    },
 }
 
 # ─── Gemini API (전략 분석 & Claude 프롬프트 생성) ──────────────────────────

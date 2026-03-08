@@ -13,6 +13,7 @@ from strategies.scalping_bb_rsi        import ScalpingBBRSIStrategy
 from strategies.scalping_5ema_reversal import FiveEMAReversalStrategy
 from strategies.macd_rsi_trend         import MACDRSITrendStrategy
 from strategies.smrh_stop              import SMRHStopStrategy
+from strategies.pump_catcher           import PumpCatcherStrategy
 from strategies.base_strategy          import BaseStrategy
 
 STRATEGY_MAP: dict[tuple[str, str], type] = {
@@ -24,6 +25,7 @@ STRATEGY_MAP: dict[tuple[str, str], type] = {
     ("scalping",            "scalping_triple_ema")   : TripleEMAStrategy,
     ("scalping",            "scalping_bb_rsi")       : ScalpingBBRSIStrategy,
     ("scalping",            "scalping_5ema_reversal"): FiveEMAReversalStrategy,
+    ("scalping",            "pump_catcher")          : PumpCatcherStrategy,
     ("trend_following",     "macd_rsi_trend")        : MACDRSITrendStrategy,
     ("trend_following",     "smrh_stop")             : SMRHStopStrategy,
 }
