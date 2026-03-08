@@ -34,6 +34,7 @@ class RealScenario:
     scenario_id: str
     strategy: object          # BaseStrategy 인스턴스
     tickers: list[str] = field(default_factory=list)
+    ticker_count: int = 10             # 거래량 상위 N개 (동적 갱신 기준)
     weight_pct: float = 100.0          # 전체 자금 중 이 시나리오 비중 (%)
     budget_pct: float = 30.0           # 시나리오 자금 중 1회 거래 비중 (%)
     daily_buy_tracker: dict = field(default_factory=dict)
@@ -64,17 +65,23 @@ class Trader:
             all_tickers: set[str] = set()
             for s in scenarios:
                 strat = load_strategy(self.market_data, s["strategy_id"], s["scenario_id"])
+                initial_tickers = s.get("tickers", list(config.TICKERS))
                 rs = RealScenario(
                     strategy_id=s["strategy_id"],
                     scenario_id=s["scenario_id"],
                     strategy=strat,
-                    tickers=s.get("tickers", list(config.TICKERS)),
+                    tickers=initial_tickers,
+                    ticker_count=s.get("ticker_count", len(initial_tickers)),
                     weight_pct=s.get("weight_pct", 100.0),
                     budget_pct=s.get("budget_pct", config.BUDGET_PER_TRADE_PCT),
                 )
                 self._scenarios.append(rs)
                 all_tickers.update(rs.tickers)
             self._active_tickers: list[str] = list(all_tickers)
+            # 멀티시나리오: 주기적 거래량 상위 갱신용 타임스탬프
+            # (time.time()으로 초기화 → 최초 갱신은 TICKER_REFRESH_HOURS 후 발생)
+            self._last_ticker_refresh: float = time.time()
+            self._multi_scenario_mode: bool = True
         else:
             # 단일전략 호환 모드 (기존 config 기반)
             strat = load_strategy(
@@ -85,15 +92,20 @@ class Trader:
                 scenario_id=config.SELECTED_SCENARIO,
                 strategy=strat,
                 tickers=list(config.TICKERS),
+                ticker_count=config.TOP_TICKERS_COUNT,
                 weight_pct=100.0,
                 budget_pct=config.BUDGET_PER_TRADE_PCT,
             )]
             self._active_tickers = list(config.TICKERS)
+            self._last_ticker_refresh: float = 0.0
+            self._multi_scenario_mode: bool = False
 
         # 첫 시나리오 strategy를 self.strategy로 유지 (scheduler 등 하위호환)
         self.strategy = self._scenarios[0].strategy
 
         # ── 동적 종목 선택 ────────────────────────────────────────────────────
+        # 멀티시나리오(scenarios 제공 시): _refresh_scenario_tickers()로 주기적 갱신
+        # 단일시나리오(config 기반): USE_DYNAMIC_TICKERS=True 시 DynamicTickerManager 사용
         self._ticker_manager: DynamicTickerManager | None = None
         if config.USE_DYNAMIC_TICKERS and not scenarios:
             self._ticker_manager = DynamicTickerManager(
@@ -298,8 +310,9 @@ class Trader:
         while self._running:
             loop_start = time.time()
 
-            # ── 동적 종목 갱신 체크 (단일전략 호환 모드에서만) ────────────────
+            # ── 동적 종목 갱신 체크 ───────────────────────────────────────────
             if self._ticker_manager:
+                # 단일전략 모드: DynamicTickerManager 사용 (기존 로직)
                 try:
                     if self.universe_selector:
                         new_tickers, changed = self._ticker_manager.refresh_if_needed(
@@ -311,9 +324,36 @@ class Trader:
                         self._update_active_tickers(new_tickers)
                 except Exception as e:
                     logger.warning(f"동적 종목 갱신 오류 (이전 종목 유지): {e}")
+            elif self._multi_scenario_mode:
+                # 멀티시나리오 모드(UI 실행): 주기적으로 거래량 상위 종목 직접 갱신
+                now = time.time()
+                refresh_sec = config.TICKER_REFRESH_HOURS * 3600
+                if now - self._last_ticker_refresh >= refresh_sec:
+                    self._refresh_scenario_tickers()
+                    self._last_ticker_refresh = now
 
             # ── 상태머신 타임아웃 처리 ───────────────────────────────────────
             self._handle_order_timeouts()
+
+            # ── 보유 포지션 중 해당 시나리오 종목 리스트에서 빠진 것 처리 ────
+            # 종목 갱신 후 ticker가 scenario.tickers에서 제거되어도 매도/손절 체크 보장
+            for position in list(self.state.all_positions()):
+                if not self._running:
+                    break
+                ticker = position.ticker
+                for scenario in self._scenarios:
+                    if scenario.scenario_id == position.scenario_id:
+                        if ticker not in scenario.tickers:
+                            # 보유 중이지만 현재 종목 리스트에 없음 → 매도/손절만 처리
+                            try:
+                                self._process_ticker(ticker, scenario)
+                            except Exception as e:
+                                logger.error(
+                                    f"[orphan][{scenario.scenario_id}][{ticker}] 처리 오류: {e}",
+                                    exc_info=True,
+                                )
+                                self._record_error()
+                        break
 
             # ── 시나리오별 종목 처리 ─────────────────────────────────────────
             for scenario in self._scenarios:
@@ -393,6 +433,56 @@ class Trader:
                         self._execute_buy(ticker, price, buy_signal, scenario)
                     else:
                         logger.debug(f"매수 차단: {ticker} - {reason}")
+
+    # ─── 멀티시나리오 종목 주기 갱신 ────────────────────────────────────────
+
+    def _refresh_scenario_tickers(self) -> None:
+        """
+        멀티시나리오 모드 전용: 거래량 상위 종목을 시나리오별로 재선정.
+
+        - 각 시나리오의 ticker_count 기준으로 top-N을 개별 조회
+        - 실패 시 기존 ticker 목록 유지 (안전 폴백)
+        - 종목 변경이 있으면 WebSocket 재구독
+        - 보유 포지션 종목은 _run_buy_loop()의 orphan 패스가 별도 처리
+        """
+        logger.info("[Trader] 멀티시나리오 거래량 상위 종목 갱신 시작...")
+        all_tickers: set[str] = set()
+
+        for scenario in self._scenarios:
+            n = scenario.ticker_count
+            if n <= 0:
+                all_tickers.update(scenario.tickers)
+                continue
+            try:
+                new_tickers = MarketData.get_top_tickers_by_volume(n)
+                # 블랙리스트 필터
+                new_tickers = [t for t in new_tickers if t not in config.TICKER_BLACKLIST]
+                new_tickers = new_tickers[:n]
+
+                added   = set(new_tickers) - set(scenario.tickers)
+                removed = set(scenario.tickers) - set(new_tickers)
+                if added or removed:
+                    logger.info(
+                        f"[{scenario.scenario_id}] 종목 변경 | "
+                        f"추가={sorted(added)[:3]} | 제거={sorted(removed)[:3]}"
+                        + (f" 외 {max(0, len(added)-3)+max(0, len(removed)-3)}종목" if (len(added)+len(removed)) > 6 else "")
+                    )
+                else:
+                    logger.debug(f"[{scenario.scenario_id}] 종목 변동 없음 ({n}개)")
+
+                scenario.tickers = new_tickers
+                all_tickers.update(new_tickers)
+            except Exception as e:
+                logger.warning(f"[{scenario.scenario_id}] 종목 갱신 실패 → 기존 유지: {e}")
+                all_tickers.update(scenario.tickers)
+
+        # WebSocket 재구독 (새 종목이 추가된 경우)
+        new_active = list(all_tickers)
+        if set(new_active) != set(self._active_tickers):
+            self._update_active_tickers(new_active)
+        else:
+            self._active_tickers = new_active
+            logger.info(f"[Trader] 종목 갱신 완료 (WebSocket 변경 없음) | 전체 {len(self._active_tickers)}개")
 
     # ─── 동적 종목 변경 ──────────────────────────────────────────────────────
 
@@ -612,7 +702,7 @@ class Trader:
 
         self.state.add_position(position)
         self.state.save()
-        self._mark_bought_today(ticker)
+        self._mark_bought_today(scenario, ticker)
 
         equity = self.risk.get_total_equity()
         self.state.update_peak_equity(equity)

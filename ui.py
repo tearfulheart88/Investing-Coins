@@ -66,8 +66,9 @@ C = type("C", (), {
 class RealScenarioRow:
     """UI에서 실제거래 시나리오 하나를 나타내는 데이터 클래스"""
     def __init__(self, idx: int = 0) -> None:
-        self.strategy_var  = tk.StringVar(value=STRATEGY_KEYS[idx % len(STRATEGY_KEYS)])
-        self.weight_var    = tk.StringVar(value="100")       # 계좌 자금 중 비중 (%)
+        self.strategy_var   = tk.StringVar(value=STRATEGY_KEYS[idx % len(STRATEGY_KEYS)])
+        self.weight_var     = tk.StringVar(value="100")      # 계좌 자금 중 비중 (%)
+        self.ticker_count_var = tk.StringVar(value=str(config.PAPER_DEFAULT_TICKER_COUNT))  # 거래량 상위 N개
         self.budget_pct_var = tk.StringVar(value="30")       # 시나리오 자금의 1회 거래 비중 (%)
         self._frame: tk.Frame | None = None
 
@@ -469,7 +470,7 @@ class TradingApp(tk.Tk):
         # 전략 변경 시 재진입 체크박스 자동 활성화
         row.strategy_var.trace_add("write", lambda *_: self._sync_reentry_for_all_scenarios())
 
-        # 2줄: 비중% + 1회매매%
+        # 2줄: 비중% + 종목수 + 1회매매%
         line2 = tk.Frame(card, bg=C.BG3)
         line2.pack(fill="x", padx=6, pady=(1, 3))
 
@@ -481,6 +482,13 @@ class TradingApp(tk.Tk):
                  justify="center").pack(side="left", padx=2)
         tk.Label(line2, text="%", font=("Arial", 8), fg=C.SUB,
                  bg=C.BG3).pack(side="left")
+
+        tk.Label(line2, text="  종목", font=("Arial", 8), fg=C.SUB,
+                 bg=C.BG3).pack(side="left", padx=(8, 0))
+        ttk.Combobox(line2, textvariable=row.ticker_count_var,
+                     values=[str(x) for x in config.PAPER_TICKER_COUNT_OPTIONS],
+                     state="readonly", font=("Consolas", 8), width=4
+                     ).pack(side="left", padx=2)
 
         tk.Label(line2, text="  1회매매", font=("Arial", 8), fg=C.SUB,
                  bg=C.BG3).pack(side="left", padx=(8, 0))
@@ -1335,12 +1343,9 @@ class TradingApp(tk.Tk):
     # ─── 공통 설정 수집 ───────────────────────────────────────────────────────
 
     def _collect_settings(self) -> bool:
-        """설정 검증 및 config 반영. 실패 시 False 반환."""
-        tickers = [t for t, v in self._ticker_vars.items() if v.get()]
-        if not tickers:
-            messagebox.showwarning("경고", "거래 종목을 하나 이상 선택하세요.")
-            return False
-
+        """설정 검증 및 config 반영. 실패 시 False 반환.
+        실제거래 종목은 시나리오별 top-N 자동 선정이므로 체크박스 미필수.
+        """
         # 멀티전략 비중 검증
         try:
             total_w = sum(float(r.weight_var.get()) for r in self._real_scenario_rows)
@@ -1355,7 +1360,6 @@ class TradingApp(tk.Tk):
         strat_id, scen_id = STRATEGIES[first_row.strategy_var.get()]
         config.SELECTED_STRATEGY = strat_id
         config.SELECTED_SCENARIO = scen_id
-        config.TICKERS           = tickers
         config.STOP_LOSS_PCT     = self._stoploss_var.get() / 100
         config.MAX_DRAWDOWN_PCT  = self._drawdown_var.get() / 100
 
@@ -1495,9 +1499,16 @@ class TradingApp(tk.Tk):
     def _run_real_trader(self) -> None:
         try:
             from core.trader import Trader
+            from data.market_data import MarketData
 
-            # 멀티시나리오 빌드
-            tickers = [t for t, v in self._ticker_vars.items() if v.get()]
+            # 멀티시나리오 빌드: 종목은 시나리오별 거래량 상위 N개 자동 선정
+            _ticker_cache: dict[int, list[str]] = {}
+
+            def _get_top(n: int) -> list[str]:
+                if n not in _ticker_cache:
+                    _ticker_cache[n] = MarketData.get_top_tickers_by_volume(n)
+                return list(_ticker_cache[n])
+
             scenarios = []
             for row in self._real_scenario_rows:
                 strat_id, scen_id = STRATEGIES.get(
@@ -1512,22 +1523,23 @@ class TradingApp(tk.Tk):
                     bpct = float(row.budget_pct_var.get())
                 except ValueError:
                     bpct = 30.0
+                try:
+                    ticker_count = int(row.ticker_count_var.get())
+                except ValueError:
+                    ticker_count = config.PAPER_DEFAULT_TICKER_COUNT
+
+                tickers = _get_top(ticker_count)
                 scenarios.append({
-                    "strategy_id": strat_id,
-                    "scenario_id": scen_id,
-                    "tickers":     tickers,
-                    "weight_pct":  weight,
-                    "budget_pct":  bpct,
+                    "strategy_id":  strat_id,
+                    "scenario_id":  scen_id,
+                    "tickers":      tickers,
+                    "ticker_count": ticker_count,
+                    "weight_pct":   weight,
+                    "budget_pct":   bpct,
                 })
 
-            # 단일 전략이면 None 전달 (기존 호환), 멀티면 scenarios 전달
-            self._trader = Trader(
-                scenarios=scenarios if len(scenarios) > 1 else None
-            )
-            # 단일 전략일 때 budget_pct 반영
-            if len(scenarios) == 1:
-                self._trader._scenarios[0].budget_pct = scenarios[0]["budget_pct"]
-                self._trader._scenarios[0].weight_pct = scenarios[0]["weight_pct"]
+            # 항상 scenarios 전달 (단일/멀티 통합) → 동적 갱신 적용
+            self._trader = Trader(scenarios=scenarios)
 
             if self._obsidian:
                 self._trader.obsidian_logger = self._obsidian
