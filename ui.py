@@ -369,18 +369,20 @@ class TradingApp(tk.Tk):
                   cursor="hand2", command=self._remove_real_scenario
                   ).pack(side="right")
 
+        # 예산 정보 행 (헤더 바로 아래, 카드 위)
+        sh2 = tk.Frame(parent, bg=C.BG2)
+        sh2.pack(fill="x", padx=12, pady=(0, 2))
+        self._real_budget_info = tk.Label(
+            sh2, text="", font=("Arial", 8), fg=C.YELLOW, bg=C.BG2, anchor="w"
+        )
+        self._real_budget_info.pack(side="left")
+
         # 실제 전략 카드 스크롤 영역
         real_wrap = tk.Frame(parent, bg=C.BG3, bd=1, relief="flat")
         real_wrap.pack(fill="x", padx=12, pady=(0, 4))
 
         self._real_card_inner = tk.Frame(real_wrap, bg=C.BG2)
         self._real_card_inner.pack(fill="x")
-
-        # 추정 필요 예산 표시 레이블 (시나리오 수 × 10만원)
-        self._real_budget_info = tk.Label(
-            parent, text="", font=("Arial", 8), fg=C.YELLOW, bg=C.BG2, anchor="w"
-        )
-        self._real_budget_info.pack(fill="x", padx=14, pady=(0, 2))
 
         # 기본 1개 시나리오 생성
         row0 = RealScenarioRow(0)
@@ -489,14 +491,13 @@ class TradingApp(tk.Tk):
                  bg=C.BG3).pack(side="left")
 
     def _add_real_scenario(self) -> None:
-        """실제거래 시나리오 추가"""
+        """실제거래 시나리오 추가.
+        _update_real_weights 내부에서 _sync_reentry_for_all_scenarios 호출."""
         idx = len(self._real_scenario_rows)
         row = RealScenarioRow(idx)
         self._real_scenario_rows.append(row)
         self._render_real_scenario_row(row)
-        self._update_real_weights()
-        # 신규 시나리오 전략의 재진입 체크박스 자동 활성화
-        self._sync_reentry_for_all_scenarios()
+        self._update_real_weights()  # 예산 갱신 + 재진입 자동 체크 포함
 
     def _remove_real_scenario(self) -> None:
         """실제거래 시나리오 마지막 삭제"""
@@ -547,6 +548,9 @@ class TradingApp(tk.Tk):
         self._real_budget_info.config(
             text=f"추정 필요 예산 ≈  {n} × 10만원 = {estimated:,}원"
         )
+
+        # 시나리오 추가·삭제 시 재진입 체크박스도 동기화
+        self._sync_reentry_for_all_scenarios()
 
     def _build_paper_tab(self, parent: tk.Frame) -> None:
         # ── 상단: 전체 예산 입력 + 균등 배분 ──
