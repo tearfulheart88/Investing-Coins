@@ -376,6 +376,12 @@ class TradingApp(tk.Tk):
         self._real_card_inner = tk.Frame(real_wrap, bg=C.BG2)
         self._real_card_inner.pack(fill="x")
 
+        # 추정 필요 예산 표시 레이블 (시나리오 수 × 10만원)
+        self._real_budget_info = tk.Label(
+            parent, text="", font=("Arial", 8), fg=C.YELLOW, bg=C.BG2, anchor="w"
+        )
+        self._real_budget_info.pack(fill="x", padx=14, pady=(0, 2))
+
         # 기본 1개 시나리오 생성
         row0 = RealScenarioRow(0)
         self._real_scenario_rows.append(row0)
@@ -457,6 +463,8 @@ class TradingApp(tk.Tk):
         ttk.Combobox(line1, textvariable=row.strategy_var,
                      values=STRATEGY_KEYS, state="readonly",
                      font=("Consolas", 7), width=32).pack(side="left", fill="x", expand=True)
+        # 전략 변경 시 재진입 체크박스 자동 활성화
+        row.strategy_var.trace_add("write", lambda *_: self._sync_reentry_for_all_scenarios())
 
         # 2줄: 비중% + 1회매매%
         line2 = tk.Frame(card, bg=C.BG3)
@@ -487,6 +495,8 @@ class TradingApp(tk.Tk):
         self._real_scenario_rows.append(row)
         self._render_real_scenario_row(row)
         self._update_real_weights()
+        # 신규 시나리오 전략의 재진입 체크박스 자동 활성화
+        self._sync_reentry_for_all_scenarios()
 
     def _remove_real_scenario(self) -> None:
         """실제거래 시나리오 마지막 삭제"""
@@ -496,8 +506,23 @@ class TradingApp(tk.Tk):
                 row._frame.destroy()
             self._update_real_weights()
 
+    def _sync_reentry_for_all_scenarios(self) -> None:
+        """실제거래 시나리오 목록에 있는 전략의 재진입 체크박스를 자동으로 활성화.
+        새 전략 추가·변경 때마다 호출되며, 시나리오에 포함된 전략은 항상 체크 상태가 됨.
+        (전체해제 후 시나리오를 추가하면 해당 전략만 재체크됨)
+        """
+        if not self._reentry_vars:
+            return  # 파라미터 탭이 아직 빌드되지 않은 경우 스킵
+        for row in self._real_scenario_rows:
+            strat_key = row.strategy_var.get()
+            ids = STRATEGIES.get(strat_key)
+            if ids:
+                _, scen_id = ids
+                if scen_id in self._reentry_vars:
+                    self._reentry_vars[scen_id].set(True)
+
     def _update_real_weights(self) -> None:
-        """실제거래 비중% 합계 표시"""
+        """실제거래 비중% 합계 표시 + 추정 예산 갱신"""
         n = len(self._real_scenario_rows)
         if n == 0:
             return
@@ -516,6 +541,12 @@ class TradingApp(tk.Tk):
             )
         except ValueError:
             self._real_weight_info.config(text="비중 입력 오류", fg=C.RED)
+
+        # 추정 필요 예산: 시나리오당 10만원 기준
+        estimated = n * 100_000
+        self._real_budget_info.config(
+            text=f"추정 필요 예산 ≈  {n} × 10만원 = {estimated:,}원"
+        )
 
     def _build_paper_tab(self, parent: tk.Frame) -> None:
         # ── 상단: 전체 예산 입력 + 균등 배분 ──
@@ -956,6 +987,10 @@ class TradingApp(tk.Tk):
         slider_row("재진입 쿨다운 (분)",         pc["cooldown_minutes"],    5.0, 120.0, 5.0, "{:.0f}분")
         self._param_vars["pump_catcher"] = pc
         reentry_row("pump_catcher")
+
+        # ── 파라미터 탭 완전 빌드 후: 현재 실제거래 시나리오 기준 재진입 초기 동기화 ──
+        # (row0은 _build_trade_settings에서 생성되므로 여기서 after()로 후처리)
+        self.after(0, self._sync_reentry_for_all_scenarios)
 
         # 여백
         tk.Frame(inner, bg=C.BG2, height=12).pack()
