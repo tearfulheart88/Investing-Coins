@@ -688,6 +688,9 @@ class TradingApp(tk.Tk):
         row.name_var.set(f"ACC-{len(self._paper_rows)+1:02d}")
         self._paper_rows.append(row)
         self._render_paper_row(row)
+        # 전체 예산 자동 갱신: 시나리오 수 × 10만원
+        n = len(self._paper_rows)
+        self._paper_total_budget_var.set(f"{n * 100_000:,}")
         self._distribute_paper_budget_equally()
 
     def _remove_paper_row(self) -> None:
@@ -695,6 +698,9 @@ class TradingApp(tk.Tk):
             row = self._paper_rows.pop()
             if row._frame:
                 row._frame.destroy()
+            # 전체 예산 자동 갱신: 시나리오 수 × 10만원
+            n = len(self._paper_rows)
+            self._paper_total_budget_var.set(f"{n * 100_000:,}")
             self._distribute_paper_budget_equally()
 
     def _build_params_tab(self, parent: tk.Frame) -> None:
@@ -748,8 +754,14 @@ class TradingApp(tk.Tk):
 
         # ── 헬퍼: 재진입 토글 ──
         def reentry_row(scenario_id: str) -> None:
-            """전략별 수익 재진입 토글 체크박스."""
-            var = tk.BooleanVar(value=(scenario_id in config.REENTRY_ENABLED_SCENARIOS))
+            """전략별 수익 재진입 토글 체크박스.
+            기본값: True — 새 전략 추가 시 별도 설정 없이도 자동 활성화됨.
+            REENTRY_ENABLED_SCENARIOS에 없으면 런타임에 자동 추가.
+            """
+            # 기본값 True: 새 전략도 자동 활성화 (REENTRY_ENABLED_SCENARIOS 미등록 시도 동일)
+            var = tk.BooleanVar(value=True)
+            # config 집합과 동기화 (미등록이면 즉시 추가)
+            config.REENTRY_ENABLED_SCENARIOS.add(scenario_id)
             self._reentry_vars[scenario_id] = var
 
             def _on_toggle(*_):

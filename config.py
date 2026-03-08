@@ -209,4 +209,5 @@ REENTRY_ENABLED_SCENARIOS: set = {      # 기본값: 전체 전략 활성화
     "scalping_5ema_reversal",
     "macd_rsi_trend",
     "smrh_stop",
+    "pump_catcher",             # 거래량 폭발 펌핑 스캘핑
 }
