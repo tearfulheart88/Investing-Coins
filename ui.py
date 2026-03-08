@@ -217,22 +217,23 @@ class TradingApp(tk.Tk):
                                        fg=C.GREEN, bg=C.HEADER)
         self._equity_label.pack(side="right", padx=12)
 
-        # GitHub 자동 업로드 버튼
-        tk.Label(bar, text="│", fg=C.SUB, bg=C.HEADER).pack(side="right", padx=4)
-        self._git_btn = tk.Button(
-            bar, text="↑ GitHub",
-            font=("Arial", 9, "bold"),
-            bg=C.BG2, fg=C.ACCENT,
-            relief="flat", bd=0, padx=10, pady=3,
-            cursor="hand2",
-            command=self._on_git_upload,
-        )
-        self._git_btn.pack(side="right", padx=(4, 0))
-        self._git_status_label = tk.Label(
-            bar, text="",
-            font=("Arial", 8), fg=C.SUB, bg=C.HEADER,
-        )
-        self._git_status_label.pack(side="right", padx=(0, 2))
+        # GitHub 자동 업로드 버튼 — GITHUB_UPLOAD_ENABLED=true 일 때만 표시
+        # (다른 사람이 클론해도 .env 미설정 → 버튼 숨김)
+        self._git_btn = None
+        self._git_status_label = tk.Label(bar, text="", font=("Arial", 8),
+                                           fg=C.SUB, bg=C.HEADER)
+        if config.GITHUB_UPLOAD_ENABLED:
+            tk.Label(bar, text="│", fg=C.SUB, bg=C.HEADER).pack(side="right", padx=4)
+            self._git_btn = tk.Button(
+                bar, text="↑ GitHub",
+                font=("Arial", 9, "bold"),
+                bg=C.BG2, fg=C.ACCENT,
+                relief="flat", bd=0, padx=10, pady=3,
+                cursor="hand2",
+                command=self._on_git_upload,
+            )
+            self._git_btn.pack(side="right", padx=(4, 0))
+            self._git_status_label.pack(side="right", padx=(0, 2))
 
     # ─── 좌측 패널 ───────────────────────────────────────────────────────────
 
@@ -2225,7 +2226,8 @@ class TradingApp(tk.Tk):
     def _git_upload_done(self, success: bool, message: str) -> None:
         """업로드 완료 후 버튼/레이블 상태 복원"""
         self._git_uploading = False
-        self._git_btn.config(state="normal", text="↑ GitHub", fg=C.ACCENT)
+        if self._git_btn:
+            self._git_btn.config(state="normal", text="↑ GitHub", fg=C.ACCENT)
         color = C.GREEN if success else C.RED
         self._git_status_label.config(text=message, fg=color)
         # 5초 후 메시지 자동 제거

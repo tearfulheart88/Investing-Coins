@@ -190,6 +190,11 @@ STRATEGY_PARAMS: dict = {
 
 # ─── Gemini API (전략 분석 & Claude 프롬프트 생성) ──────────────────────────
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
+
+# ─── GitHub 업로드 기능 (로컬 전용) ────────────────────────────────────────
+# .env 에 GITHUB_UPLOAD_ENABLED=true 설정 시에만 UI 버튼 표시
+# 미설정 또는 false → 버튼 숨김 (다른 사람이 클론해도 업로드 불가)
+GITHUB_UPLOAD_ENABLED: bool = os.environ.get("GITHUB_UPLOAD_ENABLED", "false").lower() == "true"
 GEMINI_MAX_TRADES: int = 50              # 분석에 사용할 최근 거래 수
 
 # ─── 수익 재진입 (Re-entry) ───────────────────────────────────────────────────
