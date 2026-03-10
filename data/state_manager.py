@@ -242,11 +242,15 @@ class StateManager:
         added: list[str] = []
         now_str = datetime.now(KST).isoformat()
 
+        # 블랙리스트 (스테이블코인, 신규 상장 등 제외)
+        blacklist: set[str] = set(getattr(_cfg, "TICKER_BLACKLIST", []))
+
         # tickers=None이면 계좌 전체 코인 대상, 아니면 지정 목록으로 필터
+        # 두 경우 모두 블랙리스트에 있는 종목은 제외
         candidates: list[str] = (
-            [f"KRW-{cur}" for cur in bal_map]
+            [f"KRW-{cur}" for cur in bal_map if f"KRW-{cur}" not in blacklist]
             if tickers is None
-            else tickers
+            else [t for t in tickers if t not in blacklist]
         )
 
         for ticker in candidates:

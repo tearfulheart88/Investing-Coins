@@ -87,7 +87,7 @@ class BollingerStrategy(BaseStrategy):
 
         # 0. EMA200(4h) 추세 필터 — 하락 추세에서 평균회귀 진입 금지
         if current_price < ema200_4h:
-            logger.info(
+            logger.debug(
                 f"[mr_bollinger] {ticker} EMA200(4h) 하락 추세 제외 "
                 f"price={current_price:.0f} < ema200_4h={ema200_4h:.0f}"
             )
@@ -98,7 +98,7 @@ class BollingerStrategy(BaseStrategy):
 
         # 1. 횡보장 필터 (추세장에서는 평균 회귀 위험)
         if adx >= _ADX_LIMIT:
-            logger.info(f"[mr_bollinger] {ticker} 추세장 제외 ADX={adx:.1f} >= {_ADX_LIMIT}")
+            logger.debug(f"[mr_bollinger] {ticker} 추세장 제외 ADX={adx:.1f} >= {_ADX_LIMIT}")
             return BuySignal(
                 ticker, False, current_price, f"TRENDING(ADX={adx:.1f})", metadata=meta
             )
@@ -121,7 +121,7 @@ class BollingerStrategy(BaseStrategy):
         cur_open  = float(raw_df["open"].iloc[-1])
         cur_close = float(raw_df["close"].iloc[-1])
         if cur_close < cur_open:
-            logger.info(
+            logger.debug(
                 f"[mr_bollinger] {ticker} 양봉 대기 중 "
                 f"(BB하단={lower:.0f} RSI={rsi:.1f} std={bb_std})"
             )

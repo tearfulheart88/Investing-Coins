@@ -20,8 +20,9 @@ BUDGET_PER_TRADE: int = 100_000          # 종목당 고정 투자금 (KRW)
 TICKER_BLACKLIST: list = [
     # 스테이블코인
     "KRW-USDT", "KRW-USDC", "KRW-DAI", "KRW-BUSD",
-    # 데이터 부족 (신규 상장 / 4h봉 200개 미달 → Code not found 오류 반복)
-    "KRW-EDGE",
+    # 데이터 부족 (신규 상장 / 4h봉 200개 미달 → Code not found / OHLCV 오류 반복)
+    "KRW-EDGE",   # 상장 ~6일, 4h봉 38개 (필요 200개)
+    "KRW-SIGN",   # 신규 상장, OHLCV 데이터 부족
 ]
 
 # ─── 동적 종목 선택 (거래대금 상위 N개 자동 선택) ──────────────────────────────
