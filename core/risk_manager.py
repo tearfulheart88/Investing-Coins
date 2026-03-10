@@ -108,6 +108,7 @@ class RiskManager:
         - KRW 잔고 + 전체 보유 코인 × 현재가 합산
         - positions.json에 없는 코인도 포함 (거래소 실잔고 완전 반영)
         - 현재가 조회 실패 시 avg_buy_price 폴백
+        - 블랙리스트 종목은 자산 계산 제외 (Code not found 등 가치 불명 코인)
         """
         try:
             balances = self._client.get_balances()
@@ -122,6 +123,7 @@ class RiskManager:
 
         total = 0.0
         available_krw = 0.0
+        _blacklist = set(getattr(config, "TICKER_BLACKLIST", []))
 
         for b in balances:
             currency    = b.get("currency", "")
@@ -134,6 +136,9 @@ class RiskManager:
                 total += total_amt              # 총자산엔 locked KRW도 포함
             elif total_amt > 0:
                 ticker = f"KRW-{currency}"
+                if ticker in _blacklist:
+                    logger.debug(f"자산계산 제외 (블랙리스트): {ticker}")
+                    continue
                 price  = self._get_price(ticker)
                 if price and price > 0:
                     total += price * total_amt
