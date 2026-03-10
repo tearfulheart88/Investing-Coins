@@ -17,7 +17,12 @@ TICKERS: list = ["KRW-BTC", "KRW-ETH", "KRW-SOL"]
 BUDGET_PER_TRADE: int = 100_000          # 종목당 고정 투자금 (KRW)
 
 # ─── 종목 블랙리스트 ─────────────────────────────────────────────────────────
-TICKER_BLACKLIST: list = ["KRW-USDT", "KRW-USDC", "KRW-DAI", "KRW-BUSD"]  # 스테이블코인 제외
+TICKER_BLACKLIST: list = [
+    # 스테이블코인
+    "KRW-USDT", "KRW-USDC", "KRW-DAI", "KRW-BUSD",
+    # 데이터 부족 (신규 상장 / 4h봉 200개 미달 → Code not found 오류 반복)
+    "KRW-EDGE",
+]
 
 # ─── 동적 종목 선택 (거래대금 상위 N개 자동 선택) ──────────────────────────────
 # USE_DYNAMIC_TICKERS = True 이면 TICKERS 무시, 24h 거래대금 기준 상위 N개 자동 선택
