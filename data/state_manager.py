@@ -137,6 +137,18 @@ class StateManager:
         with self._lock:
             return list(self._positions.values())
 
+    def update_position_scenario(self, ticker: str, new_scenario_id: str) -> bool:
+        """
+        포지션의 scenario_id를 변경합니다.
+        orphan 포지션을 현재 활성 시나리오로 재할당할 때 사용.
+        """
+        with self._lock:
+            pos = self._positions.get(ticker)
+            if pos is None:
+                return False
+            pos.scenario_id = new_scenario_id
+        return True
+
     def update_position_entry(
         self,
         ticker: str,

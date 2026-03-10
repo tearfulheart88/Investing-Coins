@@ -1676,8 +1676,10 @@ class TradingApp(tk.Tk):
             # 실제거래: 자산 + 포지션
             if self._trader:
                 try:
-                    equity = self._trader.risk.get_total_equity()
-                    self._equity_label.config(text=f"실제자산: {equity:,.0f}원")
+                    equity, krw = self._trader.risk.get_total_equity_from_exchange()
+                    self._equity_label.config(
+                        text=f"실제자산: {equity:,.0f}원  |  주문가능: {krw:,.0f}원"
+                    )
                     self._update_real_positions(self._trader.state.all_positions())
                 except Exception:
                     pass

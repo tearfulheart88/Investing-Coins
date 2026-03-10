@@ -100,6 +100,51 @@ class RiskManager:
 
         return total
 
+    def get_total_equity_from_exchange(self) -> tuple[float, float]:
+        """
+        업비트 실제 잔고 기반 정확한 총 평가금액 계산.
+        반환: (total_equity, available_krw)
+
+        - KRW 잔고 + 전체 보유 코인 × 현재가 합산
+        - positions.json에 없는 코인도 포함 (거래소 실잔고 완전 반영)
+        - 현재가 조회 실패 시 avg_buy_price 폴백
+        """
+        try:
+            balances = self._client.get_balances()
+        except Exception as e:
+            logger.warning(f"거래소 잔고 조회 실패 → 기존 방식 폴백: {e}")
+            krw = 0.0
+            try:
+                krw = self._client.get_balance("KRW")
+            except Exception:
+                pass
+            return self.get_total_equity(), krw
+
+        total = 0.0
+        available_krw = 0.0
+
+        for b in balances:
+            currency    = b.get("currency", "")
+            amount      = float(b.get("balance", 0) or 0)
+            locked      = float(b.get("locked", 0) or 0)
+            total_amt   = amount + locked
+
+            if currency == "KRW":
+                available_krw = amount          # 주문 가능 현금 (locked 제외)
+                total += total_amt              # 총자산엔 locked KRW도 포함
+            elif total_amt > 0:
+                ticker = f"KRW-{currency}"
+                price  = self._get_price(ticker)
+                if price and price > 0:
+                    total += price * total_amt
+                else:
+                    # 현재가 미조회 시 평균 매수가 폴백
+                    avg = float(b.get("avg_buy_price", 0) or 0)
+                    if avg > 0:
+                        total += avg * total_amt
+
+        return total, available_krw
+
     def _get_price(self, ticker: str) -> float | None:
         """PriceCache 우선, 없으면 REST 조회"""
         if self._price_cache:
@@ -117,20 +162,26 @@ class RiskManager:
 
     # ─── 신규 매수 가능 여부 종합 판단 ───────────────────────────────────────
 
-    def can_open_new_position(self, ticker: str) -> tuple[bool, str]:
+    def can_open_new_position(
+        self, ticker: str, min_budget: int | None = None
+    ) -> tuple[bool, str]:
         """
         신규 매수 전 최종 게이트 체크.
         반환: (allowed: bool, reason: str)
+
+        min_budget: 이 매수에 필요한 최소 KRW 금액.
+                    None이면 config.MIN_ORDER_KRW(최소 주문 금액)을 기준으로 체크.
         """
         # 1. 이미 포지션 보유 중
         if self._state.has_position(ticker):
             return False, f"이미 포지션 보유: {ticker}"
 
         # 2. KRW 잔고 부족
+        threshold = min_budget if min_budget is not None else config.MIN_ORDER_KRW
         try:
             krw = self._client.get_balance("KRW")
-            if krw < config.BUDGET_PER_TRADE:
-                return False, f"KRW 잔고 부족: {krw:,.0f}원 (필요: {config.BUDGET_PER_TRADE:,}원)"
+            if krw < threshold:
+                return False, f"KRW 잔고 부족: {krw:,.0f}원 (필요: {threshold:,}원)"
         except Exception as e:
             return False, f"잔고 조회 실패: {e}"
 

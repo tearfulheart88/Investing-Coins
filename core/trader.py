@@ -225,6 +225,33 @@ class Trader:
                     f"계좌 보유 종목 {len(new_tickers)}개 WebSocket 구독 추가: {new_tickers}"
                 )
 
+        # ── Orphan 포지션 시나리오 재할당 ───────────────────────────────────
+        # positions.json의 scenario_id가 현재 활성 시나리오 목록에 없는 포지션을
+        # 가장 적합한 활성 시나리오로 재할당 (UI에서 전략을 바꿨을 때 자동 정합)
+        active_scenario_ids = {s.scenario_id for s in self._scenarios}
+        # ticker → 해당 종목이 속한 첫 번째 시나리오 ID 매핑
+        ticker_to_scen: dict[str, str] = {}
+        for s in self._scenarios:
+            for t in s.tickers:
+                if t not in ticker_to_scen:
+                    ticker_to_scen[t] = s.scenario_id
+
+        reassigned: list[str] = []
+        for pos in self.state.all_positions():
+            if pos.scenario_id not in active_scenario_ids:
+                # 해당 ticker가 어느 시나리오 종목 목록에 있으면 그 시나리오로,
+                # 없으면 첫 번째 시나리오로 배정
+                new_scen = ticker_to_scen.get(pos.ticker, first_scenario_id)
+                old_scen = pos.scenario_id
+                if self.state.update_position_scenario(pos.ticker, new_scen):
+                    reassigned.append(f"{pos.ticker}({old_scen}→{new_scen})")
+
+        if reassigned:
+            self.state.save()
+            logger.info(f"Orphan 포지션 시나리오 재할당 ({len(reassigned)}개): {reassigned}")
+        else:
+            logger.info("Orphan 포지션 없음 (모든 포지션 시나리오 정합)")
+
         current_equity = self.risk.get_total_equity()
         self._session_start_equity = current_equity   # Obsidian 일보용 기준 자산
         self.state.update_peak_equity(current_equity)
@@ -448,7 +475,13 @@ class Trader:
                 self.trade_logger.log_signal(buy_signal)
 
                 if buy_signal.should_buy:
-                    allowed, reason = self.risk.can_open_new_position(ticker)
+                    # 시나리오 예산(equity × weight% × budget%) 기준으로 KRW 잔고 체크
+                    equity = self.risk.get_total_equity()
+                    min_budget = max(
+                        config.MIN_ORDER_KRW,
+                        int(equity * scenario.weight_pct / 100 * scenario.budget_pct / 100),
+                    )
+                    allowed, reason = self.risk.can_open_new_position(ticker, min_budget=min_budget)
                     if allowed:
                         self._execute_buy(ticker, price, buy_signal, scenario)
                     else:
