@@ -205,11 +205,20 @@ class StateManager:
         else:
             logger.info("포지션 대조 완료 - 이상 없음")
 
-    def sync_from_exchange(self, client, tickers: list[str]) -> None:
+    def sync_from_exchange(
+        self,
+        client,
+        tickers: list[str] | None = None,
+        default_scenario_id: str = "exchange_sync",
+    ) -> list[str]:
         """
         업비트 실제 보유 잔고 → 내부 포지션 자동 등록.
         positions.json에 없는 종목을 거래소에서 직접 가져와 포지션으로 등록.
         이미 추적 중인 종목은 건너뜀.
+
+        tickers=None이면 계좌의 전체 보유 코인을 모두 동기화.
+        tickers 지정 시 해당 목록에 포함된 종목만 동기화.
+        반환값: 새로 등록된 ticker 목록
         """
         import config as _cfg
 
@@ -217,7 +226,7 @@ class StateManager:
             balances = client.get_balances()
         except Exception as e:
             logger.warning(f"거래소 포지션 동기화 실패 (잔고 조회 오류): {e}")
-            return
+            return []
 
         # currency → {balance, avg_buy_price} 매핑
         bal_map: dict[str, dict] = {}
@@ -233,7 +242,14 @@ class StateManager:
         added: list[str] = []
         now_str = datetime.now(KST).isoformat()
 
-        for ticker in tickers:
+        # tickers=None이면 계좌 전체 코인 대상, 아니면 지정 목록으로 필터
+        candidates: list[str] = (
+            [f"KRW-{cur}" for cur in bal_map]
+            if tickers is None
+            else tickers
+        )
+
+        for ticker in candidates:
             currency = ticker.replace("KRW-", "")
             if currency not in bal_map:
                 continue
@@ -259,14 +275,15 @@ class StateManager:
                 krw_spent       = int(avg_price * volume),
                 order_uuid      = "EXCHANGE_SYNC",
                 stop_loss_price = stop_loss_price,
-                strategy_id     = "unknown",
-                scenario_id     = "exchange_sync",
+                strategy_id     = "exchange_sync",
+                scenario_id     = default_scenario_id,
             )
             self.add_position(pos)
             added.append(ticker)
             logger.info(
                 f"거래소 보유 포지션 등록: {ticker} | "
-                f"volume={volume:.8f} | avg_price={avg_price:,.0f}원"
+                f"volume={volume:.8f} | avg_price={avg_price:,.0f}원 | "
+                f"scenario={default_scenario_id}"
             )
 
         if added:
@@ -274,3 +291,5 @@ class StateManager:
             logger.info(f"거래소 동기화 완료: {len(added)}개 추가 {added}")
         else:
             logger.info("거래소 동기화: 추가할 미추적 포지션 없음")
+
+        return added

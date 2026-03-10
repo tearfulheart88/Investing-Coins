@@ -203,9 +203,27 @@ class Trader:
         """시스템 시작. 메인 스레드 블로킹."""
         self.state.load()
         self.state.reconcile_with_exchange(self.client)
-        # 업비트 기존 보유 코인을 포지션으로 자동 등록 (이 시스템 외부에서 매수한 경우 포함)
-        # _active_tickers 기준으로 동기화 (동적 종목 사용 시 config.TICKERS와 다를 수 있음)
-        self.state.sync_from_exchange(self.client, self._active_tickers)
+
+        # ── 계좌 전체 보유 코인 자동 등록 ───────────────────────────────────
+        # tickers=None → 시스템 외부에서 매수한 코인 포함 계좌 전체 동기화
+        # 등록된 포지션은 첫 번째 시나리오 ID로 배정되어 orphan 루프에서 매도/손절 처리
+        first_scenario_id = self._scenarios[0].scenario_id
+        imported = self.state.sync_from_exchange(
+            self.client,
+            tickers=None,
+            default_scenario_id=first_scenario_id,
+        )
+
+        # 새로 등록된 코인이 있으면 WebSocket 구독 목록과 active_tickers에 추가
+        # (ws.start() 전에 추가해야 연결 시 전체 종목 구독)
+        if imported:
+            new_tickers = [t for t in imported if t not in self._active_tickers]
+            if new_tickers:
+                self._active_tickers.extend(new_tickers)
+                self.ws._tickers = self._active_tickers  # start() 전이므로 직접 교체
+                logger.info(
+                    f"계좌 보유 종목 {len(new_tickers)}개 WebSocket 구독 추가: {new_tickers}"
+                )
 
         current_equity = self.risk.get_total_equity()
         self._session_start_equity = current_equity   # Obsidian 일보용 기준 자산

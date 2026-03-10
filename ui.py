@@ -3,7 +3,7 @@ Upbit 자동매매 시스템 — GUI v2
 실행: python ui.py
 """
 from __future__ import annotations
-import os, sys, queue, logging, threading, uuid
+import os, sys, queue, logging, threading, uuid, webbrowser
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 
@@ -111,6 +111,7 @@ class TradingApp(tk.Tk):
         self._real_scenario_rows: list[RealScenarioRow] = []
         self._paper_rows: list[PaperAccountRow] = []
         self._trade_log_wins: dict[str, tk.Toplevel] = {}  # 거래 로그 팝업 창 관리
+        self._chart_wins: dict[str, tk.Toplevel] = {}       # 종목 차트 팝업 창 관리
         self._param_vars: dict[str, dict[str, tk.Variable]] = {}  # 전략 파라미터 슬라이더
         self._git_uploading = False   # GitHub 업로드 진행 여부
         self._reentry_vars: dict[str, tk.BooleanVar] = {}  # 전략별 재진입 토글
@@ -1291,7 +1292,9 @@ class TradingApp(tk.Tk):
             ("stop_loss", "손절가",   110),
             ("pnl",       "평가손익",  90),
         ])
-        tk.Label(pf, text="* 3초 갱신", font=("Arial", 8),
+        self._real_pos_tree.bind("<ButtonRelease-1>", self._on_real_pos_click)
+        self._real_pos_tree.config(cursor="hand2")
+        tk.Label(pf, text="* 3초 갱신  │  종목 클릭 → 차트/단가", font=("Arial", 8),
                  fg=C.SUB, bg=C.BG).pack(anchor="e", padx=8, pady=2)
 
         # 가상계좌 현황 탭
@@ -1307,7 +1310,7 @@ class TradingApp(tk.Tk):
             ("win_rate",   "승률",      60),
         ])
         self._paper_tree.bind("<ButtonRelease-1>", self._on_paper_account_click)
-        tk.Label(vf, text="* 3초 갱신  │  계좌 행 클릭 → 거래 로그", font=("Arial", 8),
+        tk.Label(vf, text="* 3초 갱신  │  계좌 클릭 → 거래 로그  │  로그창 보유종목 클릭 → 차트/단가", font=("Arial", 8),
                  fg=C.SUB, bg=C.BG).pack(anchor="e", padx=8, pady=2)
 
     def _make_tree(self, parent: tk.Frame, cols: list[tuple]) -> ttk.Treeview:
@@ -1768,8 +1771,8 @@ class TradingApp(tk.Tk):
         # ── 창 생성 ──
         win = tk.Toplevel(self)
         win.title(f"거래 로그  │  {account_id}  ({scenario_id})")
-        win.geometry("1000x540")
-        win.minsize(720, 380)
+        win.geometry("1000x640")
+        win.minsize(720, 460)
         win.configure(bg=C.BG)
         self._trade_log_wins[account_id] = win
         win.protocol("WM_DELETE_WINDOW", lambda: self._close_trade_log_win(account_id))
@@ -1782,6 +1785,46 @@ class TradingApp(tk.Tk):
                  ).pack(side="left")
         lbl_summary = tk.Label(hf, text="", font=("Arial", 9), fg=C.FG, bg=C.BG2)
         lbl_summary.pack(side="left", padx=16)
+
+        # ── 보유 포지션 섹션 (클릭 → 차트 팝업) ──
+        pf = tk.Frame(win, bg=C.BG2, padx=4, pady=4)
+        tk.Label(pf, text="▶ 현재 보유 포지션  (클릭 → 차트/단가)",
+                 font=("Arial", 9, "bold"), fg=C.ACCENT, bg=C.BG2,
+                 ).pack(anchor="w", padx=4, pady=(0, 2))
+        pos_tree = ttk.Treeview(
+            pf,
+            columns=["ticker", "buy_price", "cur_price", "pnl"],
+            show="headings", height=4, selectmode="browse",
+        )
+        pos_tree.config(cursor="hand2")
+        for col, text, width in [
+            ("ticker",    "종목",    90),
+            ("buy_price", "매수가", 120),
+            ("cur_price", "현재가", 120),
+            ("pnl",       "손익",   110),
+        ]:
+            pos_tree.heading(col, text=text)
+            pos_tree.column(col, width=width, anchor="center")
+        pos_tree.tag_configure("profit", foreground=C.GREEN)
+        pos_tree.tag_configure("loss",   foreground=C.RED)
+        pos_tree.pack(fill="x", padx=2)
+
+        def _on_pos_click(event):
+            item = pos_tree.identify_row(event.y)
+            if not item:
+                return
+            vals = pos_tree.item(item, "values")
+            if not vals:
+                return
+            ticker_short = vals[0]
+            # KRW- 접두사 복원
+            ticker = ticker_short if ticker_short.startswith("KRW-") else f"KRW-{ticker_short}"
+            try:
+                buy_price = float(vals[1].replace(",", ""))
+            except Exception:
+                buy_price = None
+            self._show_ticker_chart_window(ticker, buy_price)
+        pos_tree.bind("<ButtonRelease-1>", _on_pos_click)
 
         # ── 거래 테이블 ──
         tf = tk.Frame(win, bg=C.BG)
@@ -1820,17 +1863,18 @@ class TradingApp(tk.Tk):
             hf, text="↻ 새로고침", font=("Arial", 8),
             bg=C.BG3, fg=C.FG, relief="flat", bd=2, padx=6, cursor="hand2",
             command=lambda: self._refresh_trade_log(
-                win, account_id, lbl_summary, log_tree),
+                win, account_id, lbl_summary, log_tree, pos_tree),
         ).pack(side="right")
 
-        # ── 레이아웃 pack (헤더 상단, 테이블 하단) ──
+        # ── 레이아웃 pack (헤더 상단, 포지션 섹션, 테이블 하단) ──
         hf.pack(fill="x")
-        tf.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        pf.pack(fill="x", padx=4, pady=(2, 0))
+        tf.pack(fill="both", expand=True, padx=4, pady=(2, 4))
 
         # 초기 로드 + 3초 자동 갱신 시작
-        self._refresh_trade_log(win, account_id, lbl_summary, log_tree)
+        self._refresh_trade_log(win, account_id, lbl_summary, log_tree, pos_tree)
         win.after(3000, lambda: self._schedule_trade_log_refresh(
-            win, account_id, lbl_summary, log_tree))
+            win, account_id, lbl_summary, log_tree, pos_tree))
 
     def _close_trade_log_win(self, account_id: str) -> None:
         win = self._trade_log_wins.pop(account_id, None)
@@ -1843,6 +1887,7 @@ class TradingApp(tk.Tk):
         account_id:  str,
         lbl_summary: tk.Label,
         tree:        ttk.Treeview,
+        pos_tree:    ttk.Treeview | None = None,
     ) -> None:
         """거래 로그 창 내용 갱신"""
         if not win.winfo_exists():
@@ -1867,6 +1912,26 @@ class TradingApp(tk.Tk):
             ),
             fg=C.GREEN if total_pnl >= 0 else C.RED,
         )
+
+        # ── 보유 포지션 갱신 ──
+        if pos_tree is not None:
+            for row in pos_tree.get_children():
+                pos_tree.delete(row)
+            for ticker, pos in scenario.account.positions.items():
+                cur_price = self._get_current_price(ticker)
+                if cur_price:
+                    pnl_pct = (cur_price - pos.buy_price) / pos.buy_price * 100
+                    pnl_str = f"{pnl_pct:+.2f}%"
+                    tag = "profit" if pnl_pct >= 0 else "loss"
+                    cur_str = f"{cur_price:,.0f}"
+                else:
+                    pnl_str, tag, cur_str = "—", "", "—"
+                pos_tree.insert("", "end", tags=(tag,), values=(
+                    ticker.replace("KRW-", ""),
+                    f"{pos.buy_price:,.0f}",
+                    cur_str,
+                    pnl_str,
+                ))
 
         # 기존 행 제거 후 최신순으로 다시 채우기
         for row in tree.get_children():
@@ -1902,13 +1967,209 @@ class TradingApp(tk.Tk):
         account_id:  str,
         lbl_summary: tk.Label,
         tree:        ttk.Treeview,
+        pos_tree:    ttk.Treeview | None = None,
     ) -> None:
         """3초 주기 자동 갱신 스케줄러"""
         if not win.winfo_exists():
             return
-        self._refresh_trade_log(win, account_id, lbl_summary, tree)
+        self._refresh_trade_log(win, account_id, lbl_summary, tree, pos_tree)
         win.after(3000, lambda: self._schedule_trade_log_refresh(
-            win, account_id, lbl_summary, tree))
+            win, account_id, lbl_summary, tree, pos_tree))
+
+    # ─── 종목 차트 팝업 ──────────────────────────────────────────────────────
+
+    def _on_real_pos_click(self, event) -> None:
+        """실제 포지션 트리 행 클릭 → 차트 팝업"""
+        item = self._real_pos_tree.identify_row(event.y)
+        if not item:
+            return
+        vals = self._real_pos_tree.item(item, "values")
+        if not vals or len(vals) < 3:
+            return
+        ticker = vals[1]  # 종목 컬럼
+        if not ticker.startswith("KRW-"):
+            ticker = f"KRW-{ticker}"
+        try:
+            buy_price = float(vals[2].replace(",", ""))
+        except Exception:
+            buy_price = None
+        self._show_ticker_chart_window(ticker, buy_price)
+
+    def _get_current_price(self, ticker: str) -> float | None:
+        """현재가 조회 (실거래/가상 price_cache 우선, 없으면 None)"""
+        if self._trader:
+            try:
+                p = self._trader.price_cache.get(ticker)
+                if p:
+                    return p
+            except Exception:
+                pass
+        if self._paper_engine:
+            try:
+                p = self._paper_engine._price_cache.get(ticker)
+                if p:
+                    return p
+            except Exception:
+                pass
+        return None
+
+    def _show_ticker_chart_window(self, ticker: str, buy_price: float | None = None) -> None:
+        """종목 차트/단가 팝업 창 (실거래·가상 공통)"""
+        if ticker in self._chart_wins:
+            win = self._chart_wins[ticker]
+            if win.winfo_exists():
+                win.lift(); win.focus_force(); return
+            del self._chart_wins[ticker]
+
+        coin = ticker.replace("KRW-", "")
+        win = tk.Toplevel(self)
+        win.title(f"차트  │  {coin}")
+        win.geometry("780x560")
+        win.minsize(600, 430)
+        win.configure(bg=C.BG)
+        self._chart_wins[ticker] = win
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_chart_win(ticker))
+
+        # ── 상단 정보 패널 ──
+        info = tk.Frame(win, bg=C.BG2, padx=10, pady=8)
+        info.pack(fill="x")
+
+        tk.Label(info, text=coin, font=("Arial", 14, "bold"),
+                 fg=C.ACCENT, bg=C.BG2).pack(side="left")
+
+        lbl_price = tk.Label(info, text="현재가: 로딩 중...",
+                             font=("Arial", 11), fg=C.FG, bg=C.BG2)
+        lbl_price.pack(side="left", padx=14)
+
+        lbl_pnl = tk.Label(info, text="", font=("Arial", 11, "bold"),
+                           fg=C.FG, bg=C.BG2)
+        lbl_pnl.pack(side="left")
+
+        if buy_price:
+            tk.Label(info, text=f"  매수가: {buy_price:,.0f}원",
+                     font=("Arial", 9), fg=C.SUB, bg=C.BG2).pack(side="left", padx=6)
+
+        # 버튼들 (오른쪽)
+        upbit_url = f"https://upbit.com/exchange?code=CRIX.UPBIT.{ticker}"
+        tk.Button(info, text="↗ 업비트", font=("Arial", 9),
+                  bg=C.BG3, fg=C.ACCENT, relief="flat", bd=2, padx=6, cursor="hand2",
+                  command=lambda: webbrowser.open(upbit_url),
+                  ).pack(side="right")
+
+        btn_reload = tk.Button(info, text="↻ 차트 갱신", font=("Arial", 9),
+                               bg=C.BG3, fg=C.FG, relief="flat", bd=2, padx=6, cursor="hand2")
+        btn_reload.pack(side="right", padx=(0, 6))
+
+        # ── 차트 영역 ──
+        chart_frame = tk.Frame(win, bg=C.BG)
+        chart_frame.pack(fill="both", expand=True, padx=4, pady=4)
+
+        try:
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+            fig = Figure(figsize=(8, 4.2), dpi=88, facecolor="#1a1b26")
+            ax  = fig.add_subplot(111)
+            canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+
+            def _draw_chart():
+                ax.cla()
+                ax.set_facecolor("#1a1b26")
+                ax.tick_params(colors="#b0b0b0", labelsize=8)
+                for sp in ax.spines.values():
+                    sp.set_edgecolor("#3a3b4e")
+                ax.yaxis.tick_right()
+                try:
+                    from data.market_data import MarketData
+                    md = MarketData()
+                    df = md.get_ohlcv_intraday(ticker, "minute5", count=60)
+                    if df is None or df.empty:
+                        ax.text(0.5, 0.5, "데이터 없음", transform=ax.transAxes,
+                                ha="center", va="center", color="#a0a0a0", fontsize=12)
+                        canvas.draw()
+                        return
+                    # 캔들스틱
+                    for i, (_, r) in enumerate(df.iterrows()):
+                        col = "#26a69a" if r["close"] >= r["open"] else "#ef5350"
+                        bot = min(r["open"], r["close"])
+                        ht  = abs(r["close"] - r["open"]) or r["high"] * 0.0005
+                        ax.bar(i, ht, bottom=bot, color=col, width=0.7, linewidth=0)
+                        ax.vlines(i, r["low"], r["high"], color=col, linewidth=0.8)
+                    # EMA 오버레이
+                    closes = df["close"].values.astype(float)
+                    for period, line_color, lbl in [
+                        (10, "#ffcc44", "EMA10"),
+                        (20, "#aa88ff", "EMA20"),
+                    ]:
+                        if len(closes) >= period:
+                            k, v = 2 / (period + 1), closes[:period].mean()
+                            ema = [None] * (period - 1) + [v]
+                            for c in closes[period:]:
+                                v = c * k + v * (1 - k)
+                                ema.append(v)
+                            xs = [i for i, v in enumerate(ema) if v is not None]
+                            ys = [v for v in ema if v is not None]
+                            ax.plot(xs, ys, color=line_color, linewidth=1.2,
+                                    label=lbl, alpha=0.85)
+                    if buy_price:
+                        ax.axhline(buy_price, color="#ff9800", linewidth=1.2,
+                                   linestyle="--", label=f"매수가 {buy_price:,.0f}", alpha=0.9)
+                    ax.legend(fontsize=8, facecolor="#252635", edgecolor="#3a3b4e",
+                              labelcolor="#c0c0c0", loc="upper left")
+                    ax.set_title(f"{coin}  5분봉  (최근 60봉)",
+                                 color="#c0c0c0", fontsize=10, pad=6)
+                    # x축 시간 레이블
+                    n = len(df)
+                    step = max(n // 8, 1)
+                    ticks = list(range(0, n, step))
+                    labels = []
+                    for idx in ticks:
+                        try:
+                            ts = df.index[idx]
+                            labels.append(ts.strftime("%H:%M") if hasattr(ts, "strftime")
+                                          else str(ts)[11:16])
+                        except Exception:
+                            labels.append("")
+                    ax.set_xticks(ticks)
+                    ax.set_xticklabels(labels, fontsize=7, color="#a0a0a0")
+                    fig.tight_layout(pad=1.2)
+                except Exception as e:
+                    ax.text(0.5, 0.5, f"차트 오류:\n{e}", transform=ax.transAxes,
+                            ha="center", va="center", color=C.RED, fontsize=9)
+                canvas.draw()
+
+            btn_reload.config(command=lambda: threading.Thread(
+                target=_draw_chart, daemon=True).start())
+
+            # 최초 로딩 (백그라운드)
+            threading.Thread(target=_draw_chart, daemon=True).start()
+
+        except ImportError:
+            tk.Label(chart_frame,
+                     text="matplotlib 미설치\npip install matplotlib",
+                     font=("Arial", 11), fg=C.RED, bg=C.BG,
+                     ).pack(expand=True)
+
+        # ── 현재가 3초 자동 갱신 ──
+        def _refresh_price():
+            if not win.winfo_exists():
+                return
+            price = self._get_current_price(ticker)
+            if price:
+                lbl_price.config(text=f"현재가: {price:,.0f}원")
+                if buy_price:
+                    pnl = (price - buy_price) / buy_price * 100
+                    lbl_pnl.config(text=f"  {pnl:+.2f}%",
+                                   fg=C.GREEN if pnl >= 0 else C.RED)
+            win.after(3000, _refresh_price)
+
+        _refresh_price()
+
+    def _close_chart_win(self, ticker: str) -> None:
+        win = self._chart_wins.pop(ticker, None)
+        if win and win.winfo_exists():
+            win.destroy()
 
     # ─── 로그 ────────────────────────────────────────────────────────────────
 
