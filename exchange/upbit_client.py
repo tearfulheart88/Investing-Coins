@@ -277,24 +277,34 @@ class UpbitClient(BaseExchangeClient):
     def _retry(self, fn, max_retries: int = 3, backoff_base: float = 1.5):
         """
         지수 백오프 재시도.
-        InsufficientBalanceError, ValueError 는 재시도 없이 즉시 전파.
+        재시도 없이 즉시 전파하는 오류 유형:
+          - InsufficientBalanceError, ValueError: 로직 오류
+          - "Code not found": 해당 마켓이 존재하지 않음 (재시도 무의미)
+          - "under_min_total": 최소 주문금액 미달 (재시도 무의미)
         """
+        # 재시도해도 의미 없는 오류 키워드 (즉시 전파)
+        _NON_RETRIABLE = ("Code not found", "under_min_total")
+
         last_exc = None
         for attempt in range(max_retries):
             try:
                 return fn()
             except (InsufficientBalanceError, ValueError):
                 raise
-            except RateLimitError as e:
-                wait = backoff_base ** attempt * 2
-                logger.warning(f"레이트 리밋 ({attempt+1}/{max_retries}), {wait:.1f}초 대기: {e}")
-                time.sleep(wait)
-                last_exc = e
             except Exception as e:
-                if attempt < max_retries - 1:
-                    wait = backoff_base ** attempt
-                    logger.warning(f"API 오류 재시도 ({attempt+1}/{max_retries}), {wait:.1f}초 대기: {e}")
+                err_str = str(e)
+                # 재시도 불필요 오류: 즉시 전파
+                if any(kw in err_str for kw in _NON_RETRIABLE):
+                    raise
+                if isinstance(e, RateLimitError):
+                    wait = backoff_base ** attempt * 2
+                    logger.warning(f"레이트 리밋 ({attempt+1}/{max_retries}), {wait:.1f}초 대기: {e}")
                     time.sleep(wait)
+                else:
+                    if attempt < max_retries - 1:
+                        wait = backoff_base ** attempt
+                        logger.warning(f"API 오류 재시도 ({attempt+1}/{max_retries}), {wait:.1f}초 대기: {e}")
+                        time.sleep(wait)
                 last_exc = e
 
         raise last_exc
