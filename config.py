@@ -23,6 +23,9 @@ TICKER_BLACKLIST: list = [
     # 데이터 부족 (신규 상장 / 4h봉 200개 미달 → Code not found / OHLCV 오류 반복)
     "KRW-EDGE",   # 상장 ~6일, 4h봉 38개 (필요 200개)
     "KRW-SIGN",   # 신규 상장, OHLCV 데이터 부족
+    # 거래 불가 / Code not found (상장폐지 또는 마켓 비활성)
+    "KRW-PDA",    # REST 가격 조회 Code not found
+    "KRW-NU",     # REST 가격 조회 Code not found
 ]
 
 # ─── 동적 종목 선택 (거래대금 상위 N개 자동 선택) ──────────────────────────────

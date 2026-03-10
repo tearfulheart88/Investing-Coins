@@ -820,6 +820,28 @@ class Trader:
                     break
                 logger.warning(f"매도 미체결, 재시도 ({attempt+1}/3): {position.ticker}")
             except OrderFailedError as e:
+                error_str = str(e)
+                # ── 소액 포지션: 업비트 최소 주문금액(5,000원) 미달 ──────────────
+                # 재시도해도 동일 오류 → 즉시 포지션 제거 후 반환
+                if "under_min_total_market_ask" in error_str:
+                    val = price * position.volume
+                    logger.warning(
+                        f"소액 포지션 매도 불가 (5,000원 미달 {val:.0f}원) → "
+                        f"포지션 자동 제거: {position.ticker}"
+                    )
+                    self.order_sm.confirm_exit(position.ticker)
+                    self.state.remove_position(position.ticker)
+                    self.state.save()
+                    self.trade_logger.log_trade(TradeRecord(
+                        ticker=position.ticker, action="SELL", price=price,
+                        volume=position.volume,
+                        strategy_id=position.strategy_id,
+                        scenario_id=position.scenario_id,
+                        reason=f"{reason}(소액청산)",
+                        order_uuid="UNDER_MIN_REMOVED",
+                        error=None,
+                    ))
+                    return
                 if attempt < 2:
                     logger.warning(f"매도 재시도 ({attempt+1}/3): {position.ticker} - {e}")
                     time.sleep(1.5 ** attempt)

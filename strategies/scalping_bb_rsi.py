@@ -77,7 +77,7 @@ class ScalpingBBRSIStrategy(BaseStrategy):
 
         # ── 1. 횡보장 필터 ──
         if adx >= _ADX_LIMIT:
-            logger.info(f"[scalping_bb_rsi] {ticker} 추세장 제외 ADX={adx:.1f} >= {_ADX_LIMIT}")
+            logger.debug(f"[scalping_bb_rsi] {ticker} 추세장 제외 ADX={adx:.1f} >= {_ADX_LIMIT}")
             return BuySignal(ticker, False, current_price, f"TRENDING(ADX={adx:.1f})", metadata=meta)
 
         if len(raw_df) < 2:
@@ -94,7 +94,7 @@ class ScalpingBBRSIStrategy(BaseStrategy):
         cur_close = float(raw_df["close"].iloc[-1])
         bullish = cur_close >= cur_open
         if not bullish:
-            logger.info(f"[scalping_bb_rsi] {ticker} 양봉 대기 (BB하단={lower:.0f} RSI={rsi:.1f})")
+            logger.debug(f"[scalping_bb_rsi] {ticker} 양봉 대기 (BB하단={lower:.0f} RSI={rsi:.1f})")
             return BuySignal(ticker, False, current_price, "WAITING_BULLISH_CANDLE", metadata=meta)
 
         # ── 3. RSI 과매도 (v2: BB하단+양봉 시 유연 진입) ──
