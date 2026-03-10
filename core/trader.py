@@ -186,6 +186,11 @@ class Trader:
         self._sell_fail_count: dict[str, int] = {}    # ticker → 연속 실패 횟수
         self._sell_cooldown: dict[str, float] = {}    # ticker → 쿨다운 만료 timestamp
 
+        # 런타임 자동 블랙리스트 (세션 중 데이터 오류 반복 종목 자동 제외)
+        # 상장폐지/거래정지 등으로 OHLCV 조회가 반복 실패하는 종목을 자동 등록
+        self._runtime_blacklist: set[str] = set()      # 세션 종료까지 스캔 제외
+        self._data_error_count: dict[str, int] = {}    # ticker → 연속 DATA_ERROR 횟수
+
         # 정상 종료 플래그
         self._running = False
 
@@ -455,6 +460,10 @@ class Trader:
         if scenario is None:
             scenario = self._scenarios[0]  # 하위호환
 
+        # ── 런타임 블랙리스트 체크 (포지션 없는 종목만 스킵) ─────────────────
+        if ticker in self._runtime_blacklist and not self.state.has_position(ticker):
+            return
+
         # ── 매도 쿨다운 체크 (연속 실패 종목은 일정 시간 스킵) ────────────────
         cooldown_until = self._sell_cooldown.get(ticker)
         if cooldown_until:
@@ -508,6 +517,22 @@ class Trader:
                 buy_signal = scenario.strategy.should_buy(ticker, price)
                 self.trade_logger.log_signal(buy_signal)
 
+                # ── 런타임 블랙리스트 자동 등록 (데이터 오류 반복 종목) ────────
+                _DATA_ERROR_REASONS = ("DATA_ERROR", "DATA_INSUFFICIENT")
+                _DATA_ERROR_LIMIT   = 5
+                if buy_signal.reason in _DATA_ERROR_REASONS:
+                    cnt = self._data_error_count.get(ticker, 0) + 1
+                    self._data_error_count[ticker] = cnt
+                    if cnt >= _DATA_ERROR_LIMIT:
+                        self._runtime_blacklist.add(ticker)
+                        self._data_error_count.pop(ticker, None)
+                        logger.warning(
+                            f"[런타임블랙리스트] {ticker} 데이터 오류 {cnt}회 연속 "
+                            f"→ 세션 종료까지 스캔 제외 (상장폐지/거래정지 의심)"
+                        )
+                else:
+                    self._data_error_count.pop(ticker, None)  # 정상 평가 시 카운터 리셋
+
                 if buy_signal.should_buy:
                     # 시나리오 예산(equity × weight% × budget%) 기준으로 KRW 잔고 체크
                     equity = self.risk.get_total_equity()
@@ -542,8 +567,9 @@ class Trader:
                 continue
             try:
                 new_tickers = MarketData.get_top_tickers_by_volume(n)
-                # 블랙리스트 필터
-                new_tickers = [t for t in new_tickers if t not in config.TICKER_BLACKLIST]
+                # 블랙리스트 필터 (config 고정 + 런타임 자동 등록)
+                combined_blacklist = set(config.TICKER_BLACKLIST) | self._runtime_blacklist
+                new_tickers = [t for t in new_tickers if t not in combined_blacklist]
                 new_tickers = new_tickers[:n]
 
                 added   = set(new_tickers) - set(scenario.tickers)
