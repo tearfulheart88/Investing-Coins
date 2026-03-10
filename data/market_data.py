@@ -562,7 +562,7 @@ class MarketData:
         ha = self._heikin_ashi(df)
         is_bull = ha["close"] > ha["open"]
         ha["is_bullish"]    = is_bull
-        ha["turned_bullish"] = (~is_bull.shift(1).fillna(True).astype(bool)) & is_bull
+        ha["turned_bullish"] = (~is_bull.shift(1).fillna(True).infer_objects(copy=False).astype(bool)) & is_bull
         return ha
 
     # ─── Stochastic Oscillator ────────────────────────────────────────────────
