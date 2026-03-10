@@ -21,6 +21,23 @@ class Position:
     stop_loss_price: float      # 손절 기준가 = buy_price * (1 - stop_loss_pct)
     strategy_id: str            # 어떤 전략으로 매수했는지
     scenario_id: str            # 어떤 시나리오로 매수했는지
+    side: str = "LONG"          # "LONG" | "SHORT" (현물=LONG)
+    leverage: int = 1           # 현물=1, 선물=2~125
+    liquidation_price: float = 0.0  # 0=현물(청산 없음)
+
+    def unrealized_pnl_pct(self, current_price: float) -> float:
+        """미실현 손익률"""
+        if self.buy_price <= 0:
+            return 0.0
+        if self.side == "LONG":
+            return (current_price - self.buy_price) / self.buy_price
+        return (self.buy_price - current_price) / self.buy_price
+
+    def unrealized_pnl_krw(self, current_price: float) -> float:
+        """미실현 손익 (KRW)"""
+        if self.side == "LONG":
+            return (current_price * self.volume) - self.krw_spent
+        return self.krw_spent - (current_price * self.volume)
 
 
 class StateManager:
@@ -56,10 +73,13 @@ class StateManager:
 
             positions_data = data.get("positions", {})
             with self._lock:
-                self._positions = {
-                    ticker: Position(**pos_dict)
-                    for ticker, pos_dict in positions_data.items()
-                }
+                self._positions = {}
+                for ticker, pos_dict in positions_data.items():
+                    # 신규 필드 기본값 폴백 (기존 JSON에 없을 수 있음)
+                    pos_dict.setdefault("side", "LONG")
+                    pos_dict.setdefault("leverage", 1)
+                    pos_dict.setdefault("liquidation_price", 0.0)
+                    self._positions[ticker] = Position(**pos_dict)
             logger.info(f"포지션 로드 완료: {list(self._positions.keys())}, peak_equity={self._peak_equity:,.0f}")
 
         except Exception as e:

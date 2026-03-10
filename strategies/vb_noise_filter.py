@@ -1,6 +1,11 @@
 """
-전략: 변동성 돌파 + 노이즈 필터 + 이동평균선 필터 (개선판 v6)
+전략: 변동성 돌파 + 노이즈 필터 + 이동평균선 필터 (개선판 v7)
 시나리오 ID: vb_noise_filter
+
+■ 개선 사항 (v7) — 2026-03-10
+  - 파라미터 재조정: ADX_MIN 15→20, K_MIN 0.3→0.4, VOL_MULT 2.0→2.5, TIME_CUT 2.5→2.0h
+  - 쿨다운 추가: 손절/타임컷 후 동일 종목 COOLDOWN_HOURS(2h) 재진입 금지
+  - on_position_closed()에 reason 인자 추가 (쿨다운 조건 판단용)
 
 ■ 개선 사항 (v6) — 2026-03-08
   - EMA200(4h) 장기 추세 필터 추가: 현재가 < EMA200(4h) 시 하락 추세로 판단, 매수 제외
@@ -68,11 +73,11 @@ logger = logging.getLogger(__name__)
 
 # ─── 모듈 상수 (config.STRATEGY_PARAMS["vb"]에서 초기화, UI 슬라이더로 런타임 변경) ──
 _vb = config.STRATEGY_PARAMS.get("vb", {})
-_K_MIN              = _vb.get("k_min",            0.3)
+_K_MIN              = _vb.get("k_min",            0.4)   # v7: 0.3→0.4 더 강한 돌파만
 _K_MAX              = _vb.get("k_max",            0.8)
-_TIME_CUT_HOURS     = _vb.get("time_cut_hours",   2.5)
+_TIME_CUT_HOURS     = _vb.get("time_cut_hours",   2.0)   # v7: 2.5→2.0 빠른 손절
 _MIN_MOMENTUM_PCT   = _vb.get("min_momentum_pct", 0.5)
-_VOL_MULT           = _vb.get("vol_mult",         2.0)
+_VOL_MULT           = _vb.get("vol_mult",         2.5)   # v7: 2.0→2.5 더 강한 거래량 필터
 _VOL_SMA_PERIOD     = 20
 _BE_TRIGGER_PCT     = _vb.get("be_trigger_pct",   1.0)
 _BE_FLOOR_PCT       = _vb.get("be_floor_pct",     0.2)
@@ -80,7 +85,8 @@ _TRAIL_DROP_PCT     = _vb.get("trail_drop_pct",   1.0)
 _USE_ATR_TRAIL      = _vb.get("use_atr_trail",    True)
 _ATR_TRAIL_MULT     = _vb.get("atr_trail_mult",   0.5)
 _EMA200_FILTER      = _vb.get("ema200_filter",    True)   # v6: EMA200(4h) 장기 추세 필터
-_ADX_MIN_VB         = _vb.get("adx_min_vb",       15.0)   # v6: ADX 최소 추세 강도 (0=비활성)
+_ADX_MIN_VB         = _vb.get("adx_min_vb",       20.0)   # v7: 15→20 노이즈 진입 방지
+_COOLDOWN_HOURS     = _vb.get("cooldown_hours",   2.0)    # v7: 손절 후 재진입 금지 시간
 
 _KST = timezone(timedelta(hours=9))
 _ATR_CACHE_SEC   = 300.0    # ATR 캐시 유효시간 (5분)
@@ -98,10 +104,13 @@ class VBNoiseFilterStrategy(BaseStrategy):
         self._atr_trail_cache: dict[str, tuple[float, float]] = {}
         # v6: EMA200(4h) 캐시 — ticker → (ema200_value, timestamp)
         self._ema200_cache: dict[str, tuple[float, float]] = {}
+        # v7: 손절 후 쿨다운 — ticker → cooldown_end_time (time.time 기준)
+        self._cooldowns: dict[str, float] = {}
 
         # v5: 매수 필터 통계 (분석/디버깅용)
         self._buy_stats: dict[str, int] = {
             "total":          0,   # should_buy 호출 총 횟수
+            "cooldown":       0,   # v7: 손절 후 쿨다운 중
             "below_ema200":   0,   # v6: EMA200(4h) 하락 추세 제외
             "low_adx":        0,   # v6: ADX 낮음 (횡보 필터)
             "no_breakout":    0,   # 변동성 돌파 미달
@@ -128,15 +137,25 @@ class VBNoiseFilterStrategy(BaseStrategy):
         return True
 
     # ─── 포지션 종료 시 내부 상태 정리 (스케줄매도/외부 매도 공통) ────────────
-    def on_position_closed(self, ticker: str) -> None:
+    def on_position_closed(self, ticker: str, reason: str = "") -> None:
         """
         포지션 종료 시 호출. 스케줄 매도(09:00), 손절, 수동 청산 등
         어떤 경로로든 포지션이 종료되면 내부 추적 상태를 정리한다.
+        v7: 손절(STOP_LOSS/TIME_CUT) 시 쿨다운 등록.
         """
         self._peaks.pop(ticker, None)
         self._time_cut_extended.discard(ticker)
         self._atr_trail_cache.pop(ticker, None)
         self._ema200_cache.pop(ticker, None)
+
+        # v7: 손절 or 타임컷 청산 시 쿨다운 등록
+        if reason and ("STOP_LOSS" in reason or "TIME_CUT" in reason):
+            cd_end = time.time() + _COOLDOWN_HOURS * 3600
+            self._cooldowns[ticker] = cd_end
+            logger.info(
+                f"[vb_noise_filter] 쿨다운 등록 | {ticker} | "
+                f"{_COOLDOWN_HOURS}h 재진입 금지 | reason={reason}"
+            )
 
     def reset_daily(self) -> None:
         """09:00 스케줄 매도 후 일괄 초기화."""
@@ -145,6 +164,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
             logger.info(
                 f"[vb_noise_filter] 일별 매수필터 통계 | "
                 f"총={self._buy_stats['total']} "
+                f"CD={self._buy_stats['cooldown']} "
                 f"EMA200X={self._buy_stats['below_ema200']} "
                 f"ADXX={self._buy_stats['low_adx']} "
                 f"돌파X={self._buy_stats['no_breakout']} "
@@ -166,6 +186,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
         self._time_cut_extended.clear()
         self._atr_trail_cache.clear()
         self._ema200_cache.clear()
+        # v7: 쿨다운은 일별 초기화하지 않음 (시간 기반으로 자동 만료)
         # 통계 초기화
         for k in self._buy_stats:
             self._buy_stats[k] = 0
@@ -209,6 +230,22 @@ class VBNoiseFilterStrategy(BaseStrategy):
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
         self._buy_stats["total"] += 1
+
+        # ── [v7] 손절 후 쿨다운 체크 ──────────────────────────────────────────
+        cd_end = self._cooldowns.get(ticker, 0.0)
+        if cd_end > 0:
+            now = time.time()
+            if now < cd_end:
+                remaining_min = (cd_end - now) / 60
+                self._buy_stats["cooldown"] += 1
+                return BuySignal(
+                    ticker=ticker, should_buy=False,
+                    current_price=current_price,
+                    reason=f"COOLDOWN({remaining_min:.0f}min)",
+                )
+            else:
+                # 쿨다운 만료 → 정리
+                del self._cooldowns[ticker]
 
         try:
             k_raw            = self._md.compute_noise_filter_k(ticker, days=config.NOISE_FILTER_DAYS)
@@ -323,6 +360,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 f"[vb_noise_filter] 매수필터 중간집계 | "
                 f"총={self._buy_stats['total']} "
                 f"통과={self._buy_stats['passed']} "
+                f"CD={self._buy_stats['cooldown']} "
                 f"EMA200X={self._buy_stats['below_ema200']} "
                 f"ADXX={self._buy_stats['low_adx']} "
                 f"돌파X={self._buy_stats['no_breakout']} "

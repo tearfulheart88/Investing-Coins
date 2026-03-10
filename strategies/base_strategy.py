@@ -2,6 +2,78 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 
+# ─── 통합 Signal (LONG/SHORT 양방향 지원) ────────────────────────────────────
+
+@dataclass
+class Signal:
+    """
+    통합 매매 신호. LONG/SHORT 양방향 지원.
+
+    action: "ENTER" (진입) | "EXIT" (청산) | "NONE" (관망)
+    side:   "LONG" | "SHORT"
+    should_act: True면 action 실행
+    """
+    ticker: str
+    action: str = "NONE"
+    side: str = "LONG"
+    should_act: bool = False
+    current_price: float = 0.0
+    reason: str = ""
+    metadata: dict = field(default_factory=dict)
+
+    @staticmethod
+    def enter(ticker: str, price: float, reason: str,
+              side: str = "LONG", **meta) -> "Signal":
+        return Signal(
+            ticker=ticker, action="ENTER", side=side,
+            should_act=True, current_price=price,
+            reason=reason, metadata=meta,
+        )
+
+    @staticmethod
+    def exit(ticker: str, price: float, reason: str,
+             side: str = "LONG", **meta) -> "Signal":
+        return Signal(
+            ticker=ticker, action="EXIT", side=side,
+            should_act=True, current_price=price,
+            reason=reason, metadata=meta,
+        )
+
+    @staticmethod
+    def no_action(ticker: str, price: float, reason: str = "") -> "Signal":
+        return Signal(
+            ticker=ticker, action="NONE", side="LONG",
+            should_act=False, current_price=price, reason=reason,
+        )
+
+    @staticmethod
+    def from_buy(bs: "BuySignal") -> "Signal":
+        """BuySignal → Signal 변환 (하위호환)"""
+        return Signal(
+            ticker=bs.ticker,
+            action="ENTER" if bs.should_buy else "NONE",
+            side="LONG",
+            should_act=bs.should_buy,
+            current_price=bs.current_price,
+            reason=bs.reason,
+            metadata=bs.metadata,
+        )
+
+    @staticmethod
+    def from_sell(ss: "SellSignal") -> "Signal":
+        """SellSignal → Signal 변환 (하위호환)"""
+        return Signal(
+            ticker=ss.ticker,
+            action="EXIT" if ss.should_sell else "NONE",
+            side="LONG",
+            should_act=ss.should_sell,
+            current_price=ss.current_price,
+            reason=ss.reason,
+        )
+
+
+# ─── 기존 BuySignal / SellSignal (하위호환 유지) ─────────────────────────────
+
 @dataclass
 class BuySignal:
     ticker: str
@@ -65,10 +137,11 @@ class BaseStrategy(ABC):
 
     # ─── 선택적 라이프사이클 콜백 (서브클래스에서 오버라이드 가능) ──────────
 
-    def on_position_closed(self, ticker: str) -> None:
+    def on_position_closed(self, ticker: str, reason: str = "") -> None:
         """
         포지션 종료 시 호출 (매도, 손절, 스케줄 매도 등 모든 경로).
         내부 추적 상태(peak, 타임컷 연장 등)를 정리한다.
+        reason: 매도 사유 ("STOP_LOSS", "TRAIL_DROP", "SCHEDULED_09H" 등)
         기본 구현: 아무것도 하지 않음.
         """
 

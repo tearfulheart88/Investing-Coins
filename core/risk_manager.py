@@ -31,14 +31,19 @@ class RiskManager:
 
     def check_stop_loss(self, position: Position, current_price: float) -> bool:
         """
-        현재가가 손절 기준가 이하이면 True.
-        stop_loss_price = buy_price * (1 - STOP_LOSS_PCT) 로 매수 시 저장됨.
+        손절 기준가 도달 여부.
+        LONG: 현재가 <= 손절가
+        SHORT: 현재가 >= 손절가
         """
-        triggered = current_price <= position.stop_loss_price
+        if position.side == "SHORT":
+            triggered = current_price >= position.stop_loss_price
+        else:
+            triggered = current_price <= position.stop_loss_price
+
         if triggered:
-            loss_pct = (position.buy_price - current_price) / position.buy_price * 100
+            loss_pct = abs(position.unrealized_pnl_pct(current_price)) * 100
             logger.warning(
-                f"손절 트리거 | {position.ticker} | "
+                f"손절 트리거 | {position.ticker} | side={position.side} | "
                 f"매수가={position.buy_price:,.0f} "
                 f"현재가={current_price:,.0f} "
                 f"손실={loss_pct:.2f}%"
@@ -87,7 +92,11 @@ class RiskManager:
         for position in self._state.all_positions():
             price = self._get_price(position.ticker)
             if price:
-                total += position.volume * price
+                if position.side == "SHORT":
+                    # SHORT: 투자금 + 미실현 손익
+                    total += position.krw_spent + position.unrealized_pnl_krw(price)
+                else:
+                    total += position.volume * price
 
         return total
 

@@ -1,6 +1,10 @@
 """
-전략: RSI 과매도 평균회귀 (개선판 v3)
+전략: RSI 과매도 평균회귀 (개선판 v4)
 시나리오 ID: mr_rsi
+
+■ 개선 사항 (v4) — 2026-03-10
+  - 쿨다운 4시간: 매도 후 동일 종목 4시간 재진입 금지
+  - 트레일링 스탑: +1.5% 수익 도달 시 peak 추적, peak에서 1.0% 하락 시 매도
 
 ■ 개선 사항 (v3) — 2026-03-05 일보 기반
   - ADX 완화 범위 축소: RSI_BUY_RANGE 40 → 37 (RSI 40은 과매도가 아님)
@@ -13,12 +17,17 @@
 매수 조건:
   1. 현재가 >= EMA(200, 4h)                  (상위 추세 필터)
   2. RSI(14, 1h) <= RSI_BUY (동적: ADX 기반 35 or 37)
+  3. 쿨다운 종료 (매도 후 4시간 경과)          (v4 신규)
 
-매도 조건: RSI >= RSI_SELL(65) OR 24h 초과 보유
+매도 조건:
+  1. 트레일링 스탑: peak ≥ entry+1.5% → peak에서 1.0% 하락 (v4 신규)
+  2. RSI >= RSI_SELL(65)
+  3. 24h 초과 보유
 
 임포트 규칙:
   이 파일은 base_strategy, data.market_data 만 임포트.
 """
+import time
 import logging
 from datetime import datetime, timezone, timedelta
 from data.market_data import MarketData
@@ -36,6 +45,9 @@ _RSI_BUY_RANGE   = 37.0         # v3: 40→37 약한 횡보장 완화 기준 (RS
 _RSI_SELL        = 65.0         # 과매수 회복 매도 기준
 _ADX_RANGE_THR   = 20.0         # 이 ADX 미만이면 완화 매수 기준 적용
 _MAX_HOLD_HOURS  = 24.0         # 최대 보유 시간 (기회비용 제한)
+_COOLDOWN_HOURS  = 4.0          # v4: 매도 후 재진입 금지 시간
+_TRAIL_TRIGGER_PCT = 1.5        # v4: 트레일링 활성화 수익률 (%)
+_TRAIL_DROP_PCT    = 1.0        # v4: peak에서 이만큼 하락 시 매도 (%)
 
 _KST = timezone(timedelta(hours=9))
 
@@ -44,6 +56,10 @@ class RSIStrategy(BaseStrategy):
 
     def __init__(self, market_data: MarketData) -> None:
         self._md = market_data
+        # v4: 쿨다운 — ticker → cooldown_end_time (time.time 기준)
+        self._cooldowns: dict[str, float] = {}
+        # v4: 트레일링 스탑 — ticker → peak price
+        self._peaks: dict[str, float] = {}
 
     def get_strategy_id(self) -> str:
         return "mean_reversion"
@@ -54,9 +70,33 @@ class RSIStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return False   # 자체 신호로 청산 → 동일 종목 복수 매매 가능
 
+    def on_position_closed(self, ticker: str, reason: str = "") -> None:
+        """v4: 모든 매도 후 쿨다운 등록 + peak 정리."""
+        self._peaks.pop(ticker, None)
+        cd_end = time.time() + _COOLDOWN_HOURS * 3600
+        self._cooldowns[ticker] = cd_end
+        logger.info(
+            f"[mr_rsi] 쿨다운 등록 | {ticker} | "
+            f"{_COOLDOWN_HOURS}h 재진입 금지 | reason={reason}"
+        )
+
     # ─── 매수 신호 ────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
+        # ── [v4] 쿨다운 체크 ──────────────────────────────────────────────────
+        cd_end = self._cooldowns.get(ticker, 0.0)
+        if cd_end > 0:
+            now = time.time()
+            if now < cd_end:
+                remaining_min = (cd_end - now) / 60
+                return BuySignal(
+                    ticker=ticker, should_buy=False,
+                    current_price=current_price,
+                    reason=f"COOLDOWN({remaining_min:.0f}min)",
+                )
+            else:
+                del self._cooldowns[ticker]
+
         try:
             rsi        = self._md.compute_rsi_intraday(ticker, _RSI_PERIOD, _INTERVAL)
             adx        = self._md.compute_adx(ticker, 14, _INTERVAL)
@@ -102,15 +142,38 @@ class RSIStrategy(BaseStrategy):
     # ─── 매도 신호 (Scale-out) ────────────────────────────────────────────────
 
     def should_sell_on_signal(self, ticker, current_price, position) -> SellSignal:
+        entry = position.buy_price
+        pnl_pct = (current_price - entry) / entry * 100
+
+        # ── [v4] 최고가 갱신 (트레일링 스탑용) ──────────────────────────────
+        peak = self._peaks.get(ticker, current_price)
+        if current_price > peak:
+            peak = current_price
+        self._peaks[ticker] = peak
+        peak_pnl_pct = (peak - entry) / entry * 100
+
+        # ── [v4] 트레일링 스탑: peak ≥ +1.5% → peak에서 1.0% 하락 시 매도 ──
+        if peak_pnl_pct >= _TRAIL_TRIGGER_PCT:
+            drop_from_peak = (peak - current_price) / peak * 100
+            if drop_from_peak >= _TRAIL_DROP_PCT:
+                reason = (
+                    f"TRAIL_STOP(peak={peak_pnl_pct:+.2f}%"
+                    f"|drop={drop_from_peak:.2f}%>={_TRAIL_DROP_PCT}%"
+                    f"|pnl={pnl_pct:+.2f}%)"
+                )
+                logger.info(
+                    f"[mr_rsi] ★ 트레일링 청산 | {ticker} | "
+                    f"entry={entry:,.0f} peak={peak:,.0f} now={current_price:,.0f} | {reason}"
+                )
+                return SellSignal(ticker, True, current_price, reason)
+
+        # ── Scale-out 1: RSI 과매수 회복 (주요 목표) ─────────────────────────
         try:
             rsi = self._md.compute_rsi_intraday(ticker, _RSI_PERIOD, _INTERVAL)
         except DataFetchError as e:
             logger.warning(f"[mr_rsi] 매도 RSI 조회 실패: {ticker}: {e}")
             return SellSignal(ticker, False, current_price, "")
 
-        pnl_pct = (current_price - position.buy_price) / position.buy_price * 100
-
-        # ── Scale-out 1: RSI 과매수 회복 (주요 목표) ─────────────────────────
         if rsi >= _RSI_SELL:
             reason = f"RSI_RECOVERED({rsi:.1f})"
             logger.info(
@@ -121,7 +184,6 @@ class RSIStrategy(BaseStrategy):
 
         # ── Scale-out 2: 최대 보유 시간 초과 ────────────────────────────────
         try:
-            # datetime 타입 가드: str 또는 datetime 모두 처리
             buy_time = position.buy_time
             if isinstance(buy_time, str):
                 buy_time = datetime.fromisoformat(buy_time)

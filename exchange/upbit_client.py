@@ -1,9 +1,9 @@
 import time
 import logging
-from dataclasses import dataclass
 import pyupbit
 
 import config
+from exchange.base_client import BaseExchangeClient, OrderResult  # noqa: F401 — re-export
 
 logger = logging.getLogger(__name__)
 
@@ -26,23 +26,9 @@ class DataFetchError(UpbitTradingError):
     """시세 데이터 조회 실패"""
 
 
-# ─── 주문 결과 ────────────────────────────────────────────────────────────────
-
-@dataclass
-class OrderResult:
-    """체결 확인 완료된 주문 결과"""
-    uuid: str
-    ticker: str
-    side: str               # 'bid' (매수) / 'ask' (매도)
-    volume: float           # 체결 수량
-    avg_price: float        # 평균 체결가
-    paid_fee: float         # 수수료
-    state: str              # 'done' / 'cancel' 등
-
-
 # ─── 업비트 클라이언트 ─────────────────────────────────────────────────────────
 
-class UpbitClient:
+class UpbitClient(BaseExchangeClient):
     """
     pyupbit 래퍼.
     - 모든 API 호출에 지수 백오프 재시도 적용

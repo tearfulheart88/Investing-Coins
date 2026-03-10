@@ -117,7 +117,7 @@ class PumpCatcherStrategy(BaseStrategy):
 
     # ─── 포지션 종료 콜백 ─────────────────────────────────────────────────────
 
-    def on_position_closed(self, ticker: str) -> None:
+    def on_position_closed(self, ticker: str, reason: str = "") -> None:
         """포지션 종료 시 내부 상태 정리 + 쿨다운 시작."""
         self._peaks.pop(ticker, None)
         self._tp_locked.discard(ticker)

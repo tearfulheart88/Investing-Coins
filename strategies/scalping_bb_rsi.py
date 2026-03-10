@@ -1,14 +1,19 @@
 """
-전략: 15분봉 볼린저 밴드 + RSI 평균 회귀 (ADX 횡보 필터)
+전략: 15분봉 볼린저 밴드 + RSI 평균 회귀 (ADX 횡보 필터) (개선판 v2)
 시나리오 ID: scalping_bb_rsi
 
+■ 개선 사항 (v2) — 2026-03-10
+  - RSI 진입 완화: 30 → 38 (기존 30은 너무 엄격, 진입 기회 부족)
+  - 유연 진입: BB 하단 이탈 + 양봉 마감 시 RSI 조건 추가 완화 (38 적용)
+    BB 하단 + 양봉이면 RSI 없이도 진입 허용 (_FLEXIBLE_BB_ENTRY)
+
 사전 필터: ADX(14, 15m) < 25  (추세 없는 횡보장에서만 매매)
-  (크립토는 추세장에서도 ADX 25~40대 → 기존 20 기준은 너무 엄격, 25로 완화)
 
 Long 매수 조건 (AND):
   1. ADX < 25                         [횡보장 확인]
   2. 이전 캔들 저가 < BB 하단(20, 2σ) [하단 이탈]
-  3. RSI(14, 15m) < 30                [과매도]
+  3. RSI(14, 15m) < 38  (v2: 30→38)  [과매도]
+     → BB하단+양봉 시 RSI 생략 가능   [유연 진입, v2 신규]
   4. 현재 캔들이 양봉                   [회복 시작 확인 → 진입]
 
 매도 조건:
@@ -30,11 +35,12 @@ _INTERVAL   = "minute15"
 _BB_PERIOD  = 20
 _BB_STD     = 2.0
 _RSI_PERIOD = 14
-_RSI_BUY    = 30.0
+_RSI_BUY    = 38.0              # v2: 30→38 진입 완화
 _ADX_PERIOD = 14
-_ADX_LIMIT  = 25.0   # 크립토 특성상 20은 너무 엄격 → 25로 완화
-_ATR_MULT   = 1.2    # SL = ATR × 1.2
-_MAX_SL_PCT = 0.03   # 최대 손절 3%
+_ADX_LIMIT  = 25.0              # 크립토 특성상 20은 너무 엄격 → 25로 완화
+_ATR_MULT   = 1.2               # SL = ATR × 1.2
+_MAX_SL_PCT = 0.03              # 최대 손절 3%
+_FLEXIBLE_BB_ENTRY = True       # v2: BB하단+양봉이면 RSI 생략 허용
 
 
 class ScalpingBBRSIStrategy(BaseStrategy):
@@ -79,19 +85,29 @@ class ScalpingBBRSIStrategy(BaseStrategy):
 
         # ── 2. 이전 캔들 저가 < BB 하단 ──
         prev_low = float(raw_df["low"].iloc[-2])
-        if prev_low >= lower:
+        bb_breached = prev_low < lower
+        if not bb_breached:
             return BuySignal(ticker, False, current_price, "BB_NOT_BREACHED", metadata=meta)
 
-        # ── 3. RSI 과매도 ──
-        if rsi >= _RSI_BUY:
-            return BuySignal(ticker, False, current_price, f"RSI_NOT_OVERSOLD({rsi:.1f})", metadata=meta)
-
-        # ── 4. 현재 캔들 양봉 ──
+        # ── 4. 현재 캔들 양봉 (순서 변경: RSI 전에 양봉 먼저 체크) ──
         cur_open  = float(raw_df["open"].iloc[-1])
         cur_close = float(raw_df["close"].iloc[-1])
-        if cur_close < cur_open:
+        bullish = cur_close >= cur_open
+        if not bullish:
             logger.info(f"[scalping_bb_rsi] {ticker} 양봉 대기 (BB하단={lower:.0f} RSI={rsi:.1f})")
             return BuySignal(ticker, False, current_price, "WAITING_BULLISH_CANDLE", metadata=meta)
+
+        # ── 3. RSI 과매도 (v2: BB하단+양봉 시 유연 진입) ──
+        # BB 하단 이탈 + 양봉 확인 완료 → RSI 조건 유연 적용
+        if _FLEXIBLE_BB_ENTRY and bb_breached and bullish:
+            # BB하단+양봉이면 RSI 필터 생략 (진입 허용)
+            if rsi >= _RSI_BUY:
+                logger.info(
+                    f"[scalping_bb_rsi] {ticker} 유연진입 (BB하단+양봉, RSI={rsi:.1f}>{_RSI_BUY})"
+                )
+        else:
+            if rsi >= _RSI_BUY:
+                return BuySignal(ticker, False, current_price, f"RSI_NOT_OVERSOLD({rsi:.1f})", metadata=meta)
 
         # ── ATR 기반 동적 손절 ──
         try:

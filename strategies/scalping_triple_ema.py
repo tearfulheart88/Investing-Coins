@@ -1,6 +1,10 @@
 """
-전략: 5분봉 삼중 EMA 기반 추세 눌림목 전략 (개선판 v3)
+전략: 5분봉 삼중 EMA 기반 추세 눌림목 전략 (개선판 v4)
 시나리오 ID: scalping_triple_ema
+
+■ 개선 사항 (v4) — 2026-03-10
+  - ATR 동적 SL: 고정 SL(1.5%) 제거 → ATR(20) × 1.5 기반 동적 SL (최대 3%)
+  - 트레일링 발동 상향: TP×0.5(=1.0%) → 1.5% (너무 빠른 트레일링 활성화 방지)
 
 ■ 개선 사항 (v3) — 2026-03-05 일보 기반
   - 타임프레임 업그레이드: 1분봉 → 5분봉 (78건/5.3%승률 → 1분봉 노이즈 제거)
@@ -49,8 +53,11 @@ _HTF_INTERVAL = "minute60"    # v3: 15분봉 → 1시간봉 (HTF 비례 상향)
 _HTF_EMA      = 200           # HTF EMA 기간 (상위 추세 필터)
 
 _TP_PCT          = 0.02       # v3: 0.6% → 2.0% (5분봉 스윙 스케일)
-_SL_PCT          = 0.015      # v3: 0.3% → 1.5% (5분봉 정상 변동 수용)
+_SL_PCT_FALLBACK = 0.015      # v4: ATR SL 실패 시 폴백 (1.5%)
+_SL_ATR_MULT     = 1.5        # v4: ATR × 1.5 = 동적 SL
+_SL_MAX_PCT      = 0.03       # v4: 동적 SL 상한 (3%)
 _TRAIL_MIN_PCT   = 0.015      # 트레일링 최소 폭 1.5%
+_TRAIL_TRIGGER_PCT = 0.015    # v4: 트레일링 활성화 수익률 (1.5%, 기존 TP×0.5=1.0%)
 _ADX_MIN         = 25.0       # [개선] 20.0 → 25.0 (강력한 추세에서만 진입, 횡보장 필터 강화)
 _EMA_SPREAD_MIN  = 0.5        # [개선] 0.3% → 0.5% (확실한 정배열 이격 확보, 휩쏘 방지)
 _PANIC_BODY_MULT = 2.5        # v3: 대형 음봉 판단 배수 (body > ATR(20) × 이 값)
@@ -178,7 +185,14 @@ class TripleEMAStrategy(BaseStrategy):
         if float(cur["close"]) <= ema10:
             return BuySignal(ticker, False, current_price, "NOT_RECLAIMED_YET", metadata=meta)
 
-        meta["stop_loss_pct"] = _SL_PCT
+        # ── [v4] ATR 동적 SL: ATR(20,5m) × 1.5, 상한 3% ──────────────────────
+        try:
+            atr_sl_pct = avg_range / current_price * _SL_ATR_MULT if avg_range > 0 else _SL_PCT_FALLBACK
+            atr_sl_pct = min(atr_sl_pct, _SL_MAX_PCT)
+        except Exception:
+            atr_sl_pct = _SL_PCT_FALLBACK
+        meta["stop_loss_pct"] = round(atr_sl_pct, 6)
+
         # [개선] 쿨타임 시작: 매수 신호 발생 시각 기록 (단조 시간 사용)
         # 이후 _COOLTIME_SEC(15분)간 동일 종목 재진입 차단
         self._last_buy_times[ticker] = time.monotonic()
@@ -203,8 +217,8 @@ class TripleEMAStrategy(BaseStrategy):
             peak = current_price
         self._peaks[ticker] = peak
 
-        # Trailing 활성화 기준: TP 50% 지점 (= entry × (1 + TP_PCT/2))
-        activation_price = entry * (1 + _TP_PCT * 0.5)
+        # v4: 트레일링 활성화 기준 = entry × (1 + 1.5%)
+        activation_price = entry * (1 + _TRAIL_TRIGGER_PCT)
 
         if peak < activation_price:
             # 미활성: risk_manager 하드 스탑에 위임
@@ -212,7 +226,7 @@ class TripleEMAStrategy(BaseStrategy):
 
         # 활성: trail_stop = max(본절가, peak × (1 − trail_pct))
         # trail_pct는 최소 TRAIL_MIN_PCT(1.5%) 보장
-        trail_pct  = max(_SL_PCT, _TRAIL_MIN_PCT)
+        trail_pct  = _TRAIL_MIN_PCT
         trail_stop = max(entry, peak * (1 - trail_pct))
 
         if current_price <= trail_stop:

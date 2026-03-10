@@ -261,6 +261,8 @@ class Trader:
                     "stop_loss_price": p.stop_loss_price,
                     "strategy_id": p.strategy_id,
                     "scenario_id": p.scenario_id,
+                    "side": p.side,
+                    "leverage": p.leverage,
                 }
                 for p in self.state.all_positions()
             }
@@ -792,13 +794,18 @@ class Trader:
             ))
             return
 
-        # 손익 계산 (수수료 포함 실질 손익)
+        # 손익 계산 (수수료 포함 실질 손익, side 대응)
         sell_price = order.avg_price if order.avg_price > 0 else price
         sell_gross  = sell_price * order.volume
         sell_fee    = order.paid_fee if order.paid_fee > 0 else sell_gross * config.FEE_RATE
         net_proceeds = sell_gross - sell_fee
-        # krw_spent = 매수 시 실제 지출(업비트 매수수수료 포함된 총투자금)
-        pnl_krw = net_proceeds - position.krw_spent
+
+        if position.side == "SHORT":
+            # SHORT: 매도(진입) 시 받은 금액 - 매수(청산) 시 지불 금액
+            pnl_krw = position.krw_spent - net_proceeds
+        else:
+            # LONG: 매도 수령금 - 매수 투자금
+            pnl_krw = net_proceeds - position.krw_spent
         pnl_pct = pnl_krw / position.krw_spent if position.krw_spent > 0 else 0
 
         # 매도 성공 → 포지션 제거 + 상태머신 청산 완료
@@ -806,10 +813,10 @@ class Trader:
         self.state.remove_position(position.ticker)
         self.state.save()
 
-        # 전략 내부 상태 정리 (peak, 타임컷 연장 등)
+        # 전략 내부 상태 정리 (peak, 타임컷 연장 등) — reason 전달로 쿨다운 등 후처리 가능
         for _s in self._scenarios:
             if _s.scenario_id == position.scenario_id:
-                _s.strategy.on_position_closed(position.ticker)
+                _s.strategy.on_position_closed(position.ticker, reason=reason)
                 break
 
         equity = self.risk.get_total_equity()

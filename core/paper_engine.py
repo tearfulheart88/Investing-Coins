@@ -115,7 +115,7 @@ class PaperEngine:
                     indicators = {}
                 trade = account.execute_sell(ticker, price, "STOP_LIQUIDATION", indicators)
                 if trade:
-                    scenario.strategy.on_position_closed(ticker)
+                    scenario.strategy.on_position_closed(ticker, reason="STOP_LIQUIDATION")
                     logger.info(
                         f"[{account.account_id}] 정지 청산 | "
                         f"{ticker} | {price:,.0f}원 | PnL={trade.pnl:+,.0f}원"
@@ -282,7 +282,7 @@ class PaperEngine:
                 indicators = self._get_indicators(ticker, price)
                 trade = account.execute_sell(ticker, price, "손절매", indicators)
                 if trade:
-                    strategy.on_position_closed(ticker)
+                    strategy.on_position_closed(ticker, reason="STOP_LOSS")
                     logger.info(
                         f"[{account.account_id}] 손절 | {ticker} | {price:,.0f}원 | "
                         f"PnL: {trade.pnl:+,.0f}원 ({trade.pnl_pct:+.2f}%)"
@@ -302,13 +302,14 @@ class PaperEngine:
                 stop_loss_price=pos.stop_loss_price,
                 strategy_id=strategy.get_strategy_id(),
                 scenario_id=strategy.get_scenario_id(),
+                side="LONG",
             )
             sell_signal = strategy.should_sell_on_signal(ticker, price, strat_pos)
             if sell_signal.should_sell:
                 indicators = self._get_indicators(ticker, price)
                 trade = account.execute_sell(ticker, price, sell_signal.reason, indicators)
                 if trade:
-                    strategy.on_position_closed(ticker)
+                    strategy.on_position_closed(ticker, reason=sell_signal.reason)
                     logger.info(
                         f"[{account.account_id}] 매도신호 | {ticker} | "
                         f"PnL: {trade.pnl:+,.0f}원 ({trade.pnl_pct:+.2f}%)"
