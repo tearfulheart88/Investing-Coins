@@ -26,6 +26,7 @@ TICKER_BLACKLIST: list = [
     # 거래 불가 / Code not found (상장폐지 또는 마켓 비활성)
     "KRW-PDA",    # REST 가격 조회 Code not found
     "KRW-NU",     # REST 가격 조회 Code not found
+    "KRW-SXP",    # OHLCV 데이터 없음 (Swipe→Solar 리브랜딩, 거래지원 종료)
 ]
 
 # ─── 동적 종목 선택 (거래대금 상위 N개 자동 선택) ──────────────────────────────
