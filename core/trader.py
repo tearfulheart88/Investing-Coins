@@ -181,6 +181,11 @@ class Trader:
         self._error_count = 0
         self._error_window_start = time.time()
 
+        # 매도 실패 쿨다운 (같은 종목 연속 실패 시 재시도 억제)
+        # 3회 연속 실패 → 5분간 매도 시도 중단 (log 폭발 방지)
+        self._sell_fail_count: dict[str, int] = {}    # ticker → 연속 실패 횟수
+        self._sell_cooldown: dict[str, float] = {}    # ticker → 쿨다운 만료 timestamp
+
         # 정상 종료 플래그
         self._running = False
 
@@ -224,6 +229,25 @@ class Trader:
                 logger.info(
                     f"계좌 보유 종목 {len(new_tickers)}개 WebSocket 구독 추가: {new_tickers}"
                 )
+
+        # ── 블랙리스트 포지션 자동 제거 ─────────────────────────────────────
+        # 블랙리스트에 추가된 종목이 positions.json에 남아있으면 가격 조회 실패 루프 발생
+        # → 시작 시 자동으로 포지션 제거 (실제 보유 코인이면 업비트 앱에서 수동 매도 필요)
+        blacklist_set = set(config.TICKER_BLACKLIST)
+        blacklisted_pos = [
+            pos for pos in self.state.all_positions()
+            if pos.ticker in blacklist_set
+        ]
+        if blacklisted_pos:
+            for pos in blacklisted_pos:
+                self.state.remove_position(pos.ticker)
+                logger.warning(
+                    f"블랙리스트 포지션 제거: {pos.ticker} | "
+                    f"buy_price={pos.buy_price:,.0f}원 | "
+                    f"실제 보유 중이라면 업비트 앱에서 직접 매도하세요"
+                )
+            self.state.save()
+            logger.info(f"블랙리스트 포지션 {len(blacklisted_pos)}개 제거 완료")
 
         # ── Orphan 포지션 시나리오 재할당 ───────────────────────────────────
         # positions.json의 scenario_id가 현재 활성 시나리오 목록에 없는 포지션을
@@ -430,6 +454,16 @@ class Trader:
         """단일 종목 처리: 가격 조회 → 상태머신 → 손절/매도신호 → 매수신호"""
         if scenario is None:
             scenario = self._scenarios[0]  # 하위호환
+
+        # ── 매도 쿨다운 체크 (연속 실패 종목은 일정 시간 스킵) ────────────────
+        cooldown_until = self._sell_cooldown.get(ticker)
+        if cooldown_until:
+            if time.time() < cooldown_until:
+                return  # 쿨다운 중
+            # 쿨다운 만료 → 초기화 후 재시도 허용
+            del self._sell_cooldown[ticker]
+            self._sell_fail_count.pop(ticker, None)
+            logger.info(f"[쿨다운 해제] {ticker} 매도 재시도 허용")
 
         price = self._get_price(ticker)
         if price is None:
@@ -865,6 +899,18 @@ class Trader:
                 reason=reason, order_uuid="FAILED",
                 error=error_msg or "체결 수량 0",
             ))
+            # ── 연속 실패 카운터 → 쿨다운 ────────────────────────────────────
+            _FAIL_LIMIT   = 3    # N회 연속 실패 시 쿨다운 진입
+            _COOLDOWN_SEC = 300  # 5분 쿨다운
+            fail = self._sell_fail_count.get(position.ticker, 0) + 1
+            self._sell_fail_count[position.ticker] = fail
+            if fail >= _FAIL_LIMIT:
+                self._sell_cooldown[position.ticker] = time.time() + _COOLDOWN_SEC
+                self._sell_fail_count.pop(position.ticker, None)
+                logger.warning(
+                    f"[쿨다운 진입] {position.ticker} 매도 {fail}회 연속 실패 "
+                    f"→ {_COOLDOWN_SEC//60}분간 재시도 중단 (업비트 앱에서 수동 매도 권장)"
+                )
             return
 
         # 손익 계산 (수수료 포함 실질 손익, side 대응)
@@ -885,6 +931,9 @@ class Trader:
         self.order_sm.confirm_exit(position.ticker)
         self.state.remove_position(position.ticker)
         self.state.save()
+        # 매도 성공 시 실패 카운터/쿨다운 초기화
+        self._sell_fail_count.pop(position.ticker, None)
+        self._sell_cooldown.pop(position.ticker, None)
 
         # 전략 내부 상태 정리 (peak, 타임컷 연장 등) — reason 전달로 쿨다운 등 후처리 가능
         for _s in self._scenarios:
