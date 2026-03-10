@@ -114,7 +114,7 @@ class RSIStrategy(BaseStrategy):
         # EMA200(4h) 추세 필터 — 하락 추세에서 평균회귀 진입 금지
         if current_price < ema200_4h:
             reason = f"BELOW_EMA200_4H({current_price:.0f}<{ema200_4h:.0f})"
-            logger.info(f"[mr_rsi] {ticker} EMA200(4h) 하락 추세 제외 | {reason}")
+            logger.debug(f"[mr_rsi] {ticker} EMA200(4h) 하락 추세 제외 | {reason}")
             return BuySignal(ticker, False, current_price, reason, metadata=meta)
 
         # Dynamic entry: 약한 횡보장에서는 RSI 기준 완화
@@ -125,7 +125,9 @@ class RSIStrategy(BaseStrategy):
         should = rsi <= rsi_buy
         reason = "RSI_OVERSOLD" if should else f"RSI_NORMAL({rsi:.1f})"
 
-        logger.info(
+        # 매수 신호 없는 평가는 DEBUG (매번 반복 → 로그 폭발 방지)
+        log_fn = logger.info if should else logger.debug
+        log_fn(
             f"[mr_rsi] {ticker} | RSI(1h)={rsi:.1f} "
             f"기준={rsi_buy}({'완화' if is_weak_range else '기본'}) "
             f"ADX={adx:.1f} EMA200_4h={ema200_4h:.0f} → {reason}"

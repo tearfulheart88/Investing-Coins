@@ -283,7 +283,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
         if ema200_4h is not None and current_price < ema200_4h:
             self._buy_stats["below_ema200"] += 1
             reason = f"BELOW_EMA200_4H({current_price:,.0f}<{ema200_4h:,.0f})"
-            logger.info(f"[vb_noise_filter] {ticker} EMA200(4h) 하락 추세 제외 | {reason}")
+            logger.debug(f"[vb_noise_filter] {ticker} EMA200(4h) 하락 추세 제외 | {reason}")
             return BuySignal(
                 ticker=ticker, should_buy=False,
                 current_price=current_price, reason=reason,

@@ -1693,7 +1693,7 @@ class TradingApp(tk.Tk):
                 except Exception:
                     pass
 
-        self.after(3000, self._poll_status)
+        self.after(5000, self._poll_status)  # 3→5초: UI 렌더 부하 절감
 
     def _update_real_positions(self, positions: list) -> None:
         for row in self._real_pos_tree.get_children():
@@ -1873,7 +1873,7 @@ class TradingApp(tk.Tk):
 
         # 초기 로드 + 3초 자동 갱신 시작
         self._refresh_trade_log(win, account_id, lbl_summary, log_tree, pos_tree)
-        win.after(3000, lambda: self._schedule_trade_log_refresh(
+        win.after(5000, lambda: self._schedule_trade_log_refresh(
             win, account_id, lbl_summary, log_tree, pos_tree))
 
     def _close_trade_log_win(self, account_id: str) -> None:
@@ -1973,7 +1973,7 @@ class TradingApp(tk.Tk):
         if not win.winfo_exists():
             return
         self._refresh_trade_log(win, account_id, lbl_summary, tree, pos_tree)
-        win.after(3000, lambda: self._schedule_trade_log_refresh(
+        win.after(5000, lambda: self._schedule_trade_log_refresh(
             win, account_id, lbl_summary, tree, pos_tree))
 
     # ─── 종목 차트 팝업 ──────────────────────────────────────────────────────
@@ -2162,7 +2162,7 @@ class TradingApp(tk.Tk):
                     pnl = (price - buy_price) / buy_price * 100
                     lbl_pnl.config(text=f"  {pnl:+.2f}%",
                                    fg=C.GREEN if pnl >= 0 else C.RED)
-            win.after(3000, _refresh_price)
+            win.after(5000, _refresh_price)
 
         _refresh_price()
 

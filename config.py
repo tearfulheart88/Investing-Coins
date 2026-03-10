@@ -58,7 +58,7 @@ ORDER_SM_ENTRY_TIMEOUT_SEC: float = 10.0   # 매수 체결 대기 타임아웃 (
 ORDER_SM_EXIT_TIMEOUT_SEC: float = 10.0    # 매도 체결 대기 타임아웃 (상태머신)
 
 # ─── 루프 & 레이트 리밋 ──────────────────────────────────────────────────────
-PRICE_CHECK_INTERVAL_SEC: int = 5       # 매수 신호 확인 주기 (초)
+PRICE_CHECK_INTERVAL_SEC: int = 10      # 매수 신호 확인 주기 (초) — 5→10 (API/CPU 부하 절감)
 ORDER_RATE_LIMIT_PER_SEC: int = 5       # 주문 API 보수적 제한 (업비트: 8/s)
 DATA_RATE_LIMIT_PER_SEC: int = 8        # 시세 API 보수적 제한 (업비트: 10/s)
 WEBSOCKET_STALE_SEC: float = 10.0       # 이 시간 초과 시 REST 폴백
