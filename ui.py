@@ -468,8 +468,11 @@ class TradingApp(tk.Tk):
         ttk.Combobox(line1, textvariable=row.strategy_var,
                      values=STRATEGY_KEYS, state="readonly",
                      font=("Consolas", 7), width=32).pack(side="left", fill="x", expand=True)
-        # 전략 변경 시 재진입 체크박스 자동 활성화
-        row.strategy_var.trace_add("write", lambda *_: self._sync_reentry_for_all_scenarios())
+        # 전략 변경 시 재진입 체크박스 자동 활성화 + 종목 미리보기 갱신
+        row.strategy_var.trace_add("write", lambda *_: (
+            self._sync_reentry_for_all_scenarios(),
+            self._refresh_tickers(),
+        ))
 
         # 2줄: 비중% + 종목수 + 1회매매%
         line2 = tk.Frame(card, bg=C.BG3)
@@ -490,6 +493,8 @@ class TradingApp(tk.Tk):
                      values=[str(x) for x in config.PAPER_TICKER_COUNT_OPTIONS],
                      state="readonly", font=("Consolas", 8), width=4
                      ).pack(side="left", padx=2)
+        # 종목 수 변경 시 미리보기 갱신
+        row.ticker_count_var.trace_add("write", lambda *_: self._refresh_tickers())
 
         tk.Label(line2, text="  1회매매", font=("Arial", 8), fg=C.SUB,
                  bg=C.BG3).pack(side="left", padx=(8, 0))
@@ -508,6 +513,7 @@ class TradingApp(tk.Tk):
         self._real_scenario_rows.append(row)
         self._render_real_scenario_row(row)
         self._update_real_weights()  # 예산 갱신 + 재진입 자동 체크 포함
+        self._refresh_tickers()       # 전략 추가 시 종목 미리보기 갱신
 
     def _remove_real_scenario(self) -> None:
         """실제거래 시나리오 마지막 삭제"""
@@ -516,6 +522,7 @@ class TradingApp(tk.Tk):
             if row._frame:
                 row._frame.destroy()
             self._update_real_weights()
+            self._refresh_tickers()   # 전략 삭제 시 종목 미리보기 갱신
 
     def _sync_reentry_for_all_scenarios(self) -> None:
         """실제거래 시나리오 목록에 있는 전략의 재진입 체크박스를 자동으로 활성화.
