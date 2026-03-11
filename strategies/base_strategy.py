@@ -150,3 +150,19 @@ class BaseStrategy(ABC):
         09:00 스케줄 매도 완료 후 호출. 일별 내부 상태 초기화.
         기본 구현: 아무것도 하지 않음.
         """
+
+    def get_history_requirements(self) -> dict[str, int]:
+        """
+        전략 진입 평가 전에 필요한 최소 봉 수.
+
+        반환 예시:
+          {
+              "day": 15,
+              "minute60": 200,
+              "minute5": 60,
+          }
+
+        신규 상장/재상장 종목의 반복 DATA_ERROR 로그를 줄이기 위한
+        사전 가드로 사용된다.
+        """
+        return {}

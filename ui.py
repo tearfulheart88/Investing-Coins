@@ -5,12 +5,14 @@ Upbit 자동매매 시스템 — GUI v2
 from __future__ import annotations
 import os, sys, queue, logging, threading, uuid, webbrowser
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from logging_.system_logger import setup_logging
+from logging_.log_context import InjectTradeModeFilter, clear_log_mode, set_log_mode
 from core.session_timer import SessionTimer, DURATION_OPTIONS
 from core.notification_manager import NotificationManager
 from logging_.obsidian_logger import ObsidianLogger
@@ -98,6 +100,7 @@ class TradingApp(tk.Tk):
         self.geometry("1200x820")
         self.minsize(960, 680)
         self.configure(bg=C.BG)
+        self._init_fonts()
 
         # 실행 상태 (실제 / 가상 독립 관리)
         self._trader         = None
@@ -115,6 +118,8 @@ class TradingApp(tk.Tk):
         self._param_vars: dict[str, dict[str, tk.Variable]] = {}  # 전략 파라미터 슬라이더
         self._git_uploading = False   # GitHub 업로드 진행 여부
         self._reentry_vars: dict[str, tk.BooleanVar] = {}  # 전략별 재진입 토글
+        self._real_refreshing = False
+        self._real_pos_syncing = False
 
         # 로그 큐
         self._log_queue: queue.Queue = queue.Queue(maxsize=2000)
@@ -132,12 +137,144 @@ class TradingApp(tk.Tk):
     def _setup_logging(self) -> None:
         setup_logging()
         h = _QueueHandler(self._log_queue)
+        h.addFilter(InjectTradeModeFilter())
         h.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)-8s] %(name)-20s | %(message)s",
+            "%(asctime)s [%(trade_mode)s/%(levelname)-8s] %(name)-20s | %(message)s",
             datefmt="%H:%M:%S",
         ))
         h.setLevel(logging.INFO)
         logging.getLogger().addHandler(h)
+
+    def _init_fonts(self) -> None:
+        families = set(tkfont.families(self))
+        self._ui_font_family = self._pick_font_family(
+            families,
+            "Malgun Gothic",
+            "맑은 고딕",
+            "Noto Sans CJK KR",
+            "NanumGothic",
+            "Segoe UI",
+            "Arial",
+        )
+        self._mono_font_family = self._pick_font_family(
+            families,
+            "D2Coding",
+            "Cascadia Mono",
+            "Consolas",
+            self._ui_font_family,
+        )
+        self._mpl_font_family = self._pick_matplotlib_font_family(
+            self._ui_font_family,
+            "Malgun Gothic",
+            "Noto Sans KR",
+            "Noto Sans CJK KR",
+            "NanumGothic",
+            "Segoe UI",
+            "Arial",
+        )
+        tkfont.nametofont("TkDefaultFont").configure(family=self._ui_font_family, size=9)
+        tkfont.nametofont("TkTextFont").configure(family=self._ui_font_family, size=9)
+        tkfont.nametofont("TkMenuFont").configure(family=self._ui_font_family, size=9)
+        tkfont.nametofont("TkHeadingFont").configure(family=self._ui_font_family, size=9)
+        tkfont.nametofont("TkFixedFont").configure(family=self._mono_font_family, size=9)
+
+    @staticmethod
+    def _pick_font_family(families: set[str], *candidates: str) -> str:
+        for name in candidates:
+            if name in families:
+                return name
+        return next(iter(families), "Arial")
+
+    @staticmethod
+    def _pick_matplotlib_font_family(*candidates: str) -> str:
+        try:
+            from matplotlib import font_manager
+        except Exception:
+            return "DejaVu Sans"
+
+        alias_map = {
+            "맑은 고딕": "Malgun Gothic",
+        }
+        checked: set[str] = set()
+
+        for name in candidates:
+            if not name:
+                continue
+            aliases = [alias_map.get(name, name)]
+            if aliases[0] != name:
+                aliases.append(name)
+            for candidate in aliases:
+                if candidate in checked:
+                    continue
+                checked.add(candidate)
+                try:
+                    font_manager.findfont(candidate, fallback_to_default=False)
+                    return candidate
+                except Exception:
+                    continue
+
+        for path in font_manager.findSystemFonts():
+            lower_path = path.lower()
+            if not any(key in lower_path for key in (
+                "malgun",
+                "nanumgothic",
+                "notosanskr",
+                "notosanscjkkr",
+                "segoeui",
+                "arial",
+            )):
+                continue
+            try:
+                font_manager.fontManager.addfont(path)
+                return font_manager.FontProperties(fname=path).get_name()
+            except Exception:
+                continue
+
+        return "DejaVu Sans"
+
+    def _ui_font(self, size: int, *styles: str) -> tuple:
+        return (self._ui_font_family, size, *styles)
+
+    def _mono_font(self, size: int, *styles: str) -> tuple:
+        return (self._mono_font_family, size, *styles)
+
+    @staticmethod
+    def _format_price(value: float | None) -> str:
+        if value is None or value <= 0:
+            return "—"
+        if value >= 100:
+            return f"{value:,.0f}"
+        if value >= 1:
+            return f"{value:,.2f}".rstrip("0").rstrip(".")
+        if value >= 0.1:
+            return f"{value:,.4f}".rstrip("0").rstrip(".")
+        return f"{value:,.6f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _format_volume(value: float | None) -> str:
+        if value is None or value <= 0:
+            return "—"
+        return f"{value:.8f}".rstrip("0").rstrip(".")
+
+    def _get_target_display(self, pos) -> str:
+        price = float(getattr(pos, "take_profit_price", 0.0) or 0.0)
+        label = str(getattr(pos, "take_profit_label", "") or "")
+        if price > 0 and label:
+            return f"{label} {self._format_price(price)}"
+        if price > 0:
+            return self._format_price(price)
+        if label:
+            return label
+        dynamic_map = {
+            "vb_noise_filter": "09:00/동적",
+            "vb_standard": "09:00/동적",
+            "mr_rsi": "RSI 회복",
+            "macd_rsi_trend": "MACD/RSI 약화",
+            "smrh_stop": "HA/MACD 약화",
+            "scalping_triple_ema": "트레일링",
+            "pump_catcher": "트레일링",
+        }
+        return dynamic_map.get(getattr(pos, "scenario_id", ""), "동적")
 
     # ─── TTK 스타일 ──────────────────────────────────────────────────────────
 
@@ -146,14 +283,14 @@ class TradingApp(tk.Tk):
         s.theme_use("clam")
         s.configure("TNotebook",       background=C.BG,  borderwidth=0)
         s.configure("TNotebook.Tab",   background=C.BG2, foreground=C.FG,
-                    padding=[12, 5], font=("Arial", 9))
+                    padding=[12, 5], font=self._ui_font(9))
         s.map("TNotebook.Tab",
               background=[("selected", C.BG3)],
               foreground=[("selected", C.ACCENT)])
         s.configure("Treeview",        background=C.BG2, foreground=C.FG,
-                    fieldbackground=C.BG2, rowheight=26, font=("Consolas", 9))
+                    fieldbackground=C.BG2, rowheight=26, font=self._mono_font(9))
         s.configure("Treeview.Heading", background=C.BG3, foreground=C.ACCENT,
-                    font=("Arial", 9, "bold"))
+                    font=self._ui_font(9, "bold"))
         s.map("Treeview", background=[("selected", C.BG3)])
         s.configure("TCombobox",       fieldbackground=C.BG3,
                     background=C.BG3, foreground=C.FG, arrowcolor=C.FG)
@@ -292,17 +429,23 @@ class TradingApp(tk.Tk):
         bf1 = tk.Frame(parent, bg=C.BG2)
         bf1.pack(side="bottom", fill="x", padx=12, pady=(2, 5))
         self._real_start_btn = tk.Button(
-            bf1, text="▶  실제 시작", font=("Arial", 10, "bold"),
+            bf1, text="▶  실제 시작", font=self._ui_font(10, "bold"),
             bg=C.PEACH, fg=C.HEADER, relief="flat", bd=0, pady=7,
             cursor="hand2", command=self._on_start_real,
         )
         self._real_start_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
         self._real_stop_btn = tk.Button(
-            bf1, text="■  정지", font=("Arial", 10, "bold"),
+            bf1, text="■  정지", font=self._ui_font(10, "bold"),
             bg=C.BG3, fg=C.FG, relief="flat", bd=0, pady=7,
             state="disabled", cursor="hand2", command=self._on_stop_real,
         )
-        self._real_stop_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
+        self._real_stop_btn.pack(side="left", fill="x", expand=True, padx=3)
+        self._real_refresh_btn = tk.Button(
+            bf1, text="↻  종목군 갱신", font=self._ui_font(9, "bold"),
+            bg=C.BG3, fg=C.ACCENT, relief="flat", bd=0, pady=7,
+            state="disabled", cursor="hand2", command=self._on_refresh_real,
+        )
+        self._real_refresh_btn.pack(side="left", padx=(3, 0))
 
         tk.Label(parent, text="실제거래", font=("Arial", 8, "bold"),
                  fg=C.PEACH, bg=C.BG2).pack(side="bottom", anchor="w", padx=14)
@@ -1260,7 +1403,7 @@ class TradingApp(tk.Tk):
         # 로그 탭
         lf = tk.Frame(nb, bg=C.BG); nb.add(lf, text="  로그  ")
         self._log_text = scrolledtext.ScrolledText(
-            lf, font=("Consolas", 9), bg="#181825", fg=C.FG,
+            lf, font=self._mono_font(9), bg="#181825", fg=C.FG,
             insertbackground="white", relief="flat", bd=0, state="disabled",
         )
         self._log_text.pack(fill="both", expand=True, padx=2, pady=2)
@@ -1269,7 +1412,7 @@ class TradingApp(tk.Tk):
         self._log_text.tag_config("WARNING",  foreground=C.YELLOW)
         self._log_text.tag_config("ERROR",    foreground=C.RED)
         self._log_text.tag_config("CRITICAL", foreground="#ff5555",
-                                   font=("Consolas", 9, "bold"))
+                                   font=self._mono_font(9, "bold"))
 
         # 로그 필터 버튼 바
         log_bf = tk.Frame(lf, bg=C.BG)
@@ -1291,18 +1434,53 @@ class TradingApp(tk.Tk):
 
         # 실제 포지션 탭
         pf = tk.Frame(nb, bg=C.BG); nb.add(pf, text="  실제 포지션  ")
+        pf_toolbar = tk.Frame(pf, bg=C.BG)
+        pf_toolbar.pack(fill="x", padx=4, pady=(4, 0))
+        tk.Label(
+            pf_toolbar,
+            text="거래소 잔고 기준 수동 동기화",
+            font=self._ui_font(8),
+            fg=C.SUB,
+            bg=C.BG,
+        ).pack(side="left")
+        self._real_pos_sync_btn = tk.Button(
+            pf_toolbar,
+            text="↻  거래소 동기화",
+            font=self._ui_font(9, "bold"),
+            bg=C.BG3,
+            fg=C.PEACH,
+            relief="flat",
+            bd=0,
+            pady=5,
+            padx=10,
+            state="disabled",
+            cursor="hand2",
+            command=self._on_sync_real_positions,
+        )
+        self._real_pos_sync_btn.pack(side="right")
         self._real_pos_tree = self._make_tree(pf, [
-            ("scenario",  "전략",      90),
-            ("ticker",    "종목",      80),
-            ("buy_price", "매수가",   110),
-            ("volume",    "수량",     120),
-            ("stop_loss", "손절가",   110),
-            ("pnl",       "평가손익",  90),
+            ("scenario",  "전략",      72),
+            ("ticker",    "종목",      78),
+            ("cur_price", "현재가",    92),
+            ("buy_price", "매수가",    92),
+            ("volume",    "수량",      96),
+            ("stop_loss", "손절가",    92),
+            ("target",    "익절목표", 100),
+            ("pnl_krw",   "손익(원)",  96),
+            ("pnl_pct",   "수익률",    72),
         ])
         self._real_pos_tree.bind("<ButtonRelease-1>", self._on_real_pos_click)
         self._real_pos_tree.config(cursor="hand2")
-        tk.Label(pf, text="* 3초 갱신  │  종목 클릭 → 차트/단가", font=("Arial", 8),
-                 fg=C.SUB, bg=C.BG).pack(anchor="e", padx=8, pady=2)
+        tk.Label(
+            pf,
+            text=(
+                f"* 5초 표시 갱신  │  {config.EXCHANGE_POSITION_SYNC_SEC}초 거래소 자동 동기화"
+                "  │  종목 클릭 → 차트/단가"
+            ),
+            font=self._ui_font(8),
+            fg=C.SUB,
+            bg=C.BG,
+        ).pack(anchor="e", padx=8, pady=2)
 
         # 가상계좌 현황 탭
         vf = tk.Frame(nb, bg=C.BG); nb.add(vf, text="  가상계좌 현황  ")
@@ -1321,14 +1499,28 @@ class TradingApp(tk.Tk):
                  fg=C.SUB, bg=C.BG).pack(anchor="e", padx=8, pady=2)
 
     def _make_tree(self, parent: tk.Frame, cols: list[tuple]) -> ttk.Treeview:
-        tree = ttk.Treeview(parent, columns=[c[0] for c in cols],
-                             show="headings", selectmode="none")
+        wrap = tk.Frame(parent, bg=C.BG)
+        wrap.pack(fill="both", expand=True, padx=4, pady=4)
+        wrap.grid_rowconfigure(0, weight=1)
+        wrap.grid_columnconfigure(0, weight=1)
+
+        tree = ttk.Treeview(
+            wrap,
+            columns=[c[0] for c in cols],
+            show="headings",
+            selectmode="none",
+        )
         for col, text, width in cols:
             tree.heading(col, text=text)
             tree.column(col, width=width, anchor="center")
         tree.tag_configure("profit", foreground=C.GREEN)
         tree.tag_configure("loss",   foreground=C.RED)
-        tree.pack(fill="both", expand=True, padx=4, pady=4)
+        y_scroll = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        x_scroll = ttk.Scrollbar(wrap, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
         return tree
 
     # ─── 상태 인디케이터 ──────────────────────────────────────────────────────
@@ -1428,13 +1620,72 @@ class TradingApp(tk.Tk):
         self._real_running = True
         self._real_start_btn.config(state="disabled")
         self._real_stop_btn.config(state="normal")
+        self._real_refresh_btn.config(state="disabled", text="↻  준비 중...")
+        if hasattr(self, "_real_pos_sync_btn"):
+            self._real_pos_sync_btn.config(state="disabled", text="↻  동기화 준비 중...")
         self._update_status_dots()
         self._ensure_session_timer()
         self._start_real()
 
     def _on_stop_real(self) -> None:
         self._real_stop_btn.config(state="disabled", text="■  정지 중...")
+        self._real_refresh_btn.config(state="disabled", text="↻  종목군 갱신")
+        if hasattr(self, "_real_pos_sync_btn"):
+            self._real_pos_sync_btn.config(state="disabled", text="↻  거래소 동기화")
         threading.Thread(target=self._do_stop_real, daemon=True).start()
+
+    def _on_refresh_real(self) -> None:
+        if self._real_refreshing:
+            return
+        if not self._real_running or not self._trader:
+            self._refresh_tickers()
+            return
+        self._real_refreshing = True
+        self._real_refresh_btn.config(state="disabled", text="↻  갱신 중...")
+        threading.Thread(target=self._do_refresh_real, daemon=True).start()
+
+    def _do_refresh_real(self) -> None:
+        try:
+            if self._trader:
+                self._trader.refresh_tickers_now()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"실거래 종목 수동 갱신 실패: {e}", exc_info=True)
+        finally:
+            self.after(0, self._finish_refresh_real)
+
+    def _finish_refresh_real(self) -> None:
+        self._real_refreshing = False
+        if self._real_running and self._trader:
+            self._real_refresh_btn.config(state="normal", text="↻  종목군 갱신")
+        else:
+            self._real_refresh_btn.config(state="disabled", text="↻  종목군 갱신")
+
+    def _on_sync_real_positions(self) -> None:
+        if self._real_pos_syncing:
+            return
+        if not self._real_running or not self._trader:
+            return
+        self._real_pos_syncing = True
+        self._real_pos_sync_btn.config(state="disabled", text="↻  동기화 중...")
+        threading.Thread(target=self._do_sync_real_positions, daemon=True).start()
+
+    def _do_sync_real_positions(self) -> None:
+        try:
+            if self._trader:
+                self._trader.sync_exchange_positions_now(reason="manual")
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"거래소 포지션 동기화 실패: {e}", exc_info=True)
+        finally:
+            self.after(0, self._finish_sync_real_positions)
+
+    def _finish_sync_real_positions(self) -> None:
+        self._real_pos_syncing = False
+        if not hasattr(self, "_real_pos_sync_btn"):
+            return
+        if self._real_running and self._trader:
+            self._real_pos_sync_btn.config(state="normal", text="↻  거래소 동기화")
+        else:
+            self._real_pos_sync_btn.config(state="disabled", text="↻  거래소 동기화")
 
     def _do_stop_real(self) -> None:
         if self._trader:
@@ -1446,8 +1697,13 @@ class TradingApp(tk.Tk):
     def _on_real_stopped(self) -> None:
         self._trader = None
         self._real_running = False
+        self._real_refreshing = False
+        self._real_pos_syncing = False
         self._real_start_btn.config(state="normal")
         self._real_stop_btn.config(state="disabled", text="■  정지")
+        self._real_refresh_btn.config(state="disabled", text="↻  종목군 갱신")
+        if hasattr(self, "_real_pos_sync_btn"):
+            self._real_pos_sync_btn.config(state="disabled", text="↻  거래소 동기화")
         self._update_status_dots()
 
     # ─── 가상거래 시작 / 정지 ────────────────────────────────────────────────
@@ -1476,13 +1732,17 @@ class TradingApp(tk.Tk):
         threading.Thread(target=self._do_stop_paper, daemon=True).start()
 
     def _do_stop_paper(self) -> None:
-        if self._paper_engine:
-            self._paper_engine.stop()
-        if hasattr(self, "_paper_ws"):
-            self._paper_ws.stop()
-        self._paper_running = False
-        self._cleanup_if_all_stopped()
-        self.after(0, self._on_paper_stopped)
+        set_log_mode("paper")
+        try:
+            if self._paper_engine:
+                self._paper_engine.stop()
+            if hasattr(self, "_paper_ws"):
+                self._paper_ws.stop()
+            self._paper_running = False
+            self._cleanup_if_all_stopped()
+            self.after(0, self._on_paper_stopped)
+        finally:
+            clear_log_mode()
 
     def _on_paper_stopped(self) -> None:
         self._paper_engine = None
@@ -1507,17 +1767,23 @@ class TradingApp(tk.Tk):
         self._trader_thread.start()
 
     def _run_real_trader(self) -> None:
+        set_log_mode("real")
         try:
             from core.trader import Trader
             from data.market_data import MarketData
+            from strategies.registry import load_strategy
 
-            # 멀티시나리오 빌드: 종목은 시나리오별 거래량 상위 N개 자동 선정
-            _ticker_cache: dict[int, list[str]] = {}
-
-            def _get_top(n: int) -> list[str]:
-                if n not in _ticker_cache:
-                    _ticker_cache[n] = MarketData.get_top_tickers_by_volume(n)
-                return list(_ticker_cache[n])
+            # 멀티시나리오 빌드: 전략별 히스토리를 만족하는 종목만 선별
+            md = MarketData()
+            try:
+                max_n = max(int(r.ticker_count_var.get()) for r in self._real_scenario_rows)
+            except ValueError:
+                max_n = config.PAPER_DEFAULT_TICKER_COUNT
+            pool_size = min(max(max_n * 5, 50), 200)
+            raw_pool = [
+                t for t in MarketData.get_top_tickers_by_volume(pool_size)
+                if t not in set(config.TICKER_BLACKLIST)
+            ]
 
             scenarios = []
             for row in self._real_scenario_rows:
@@ -1538,7 +1804,13 @@ class TradingApp(tk.Tk):
                 except ValueError:
                     ticker_count = config.PAPER_DEFAULT_TICKER_COUNT
 
-                tickers = _get_top(ticker_count)
+                strategy = load_strategy(md, strat_id, scen_id)
+                tickers = md.get_top_tickers_for_strategy(
+                    strategy,
+                    ticker_count,
+                    blacklist=set(config.TICKER_BLACKLIST),
+                    base_tickers=raw_pool,
+                )
                 scenarios.append({
                     "strategy_id":  strat_id,
                     "scenario_id":  scen_id,
@@ -1550,6 +1822,8 @@ class TradingApp(tk.Tk):
 
             # 항상 scenarios 전달 (단일/멀티 통합) → 동적 갱신 적용
             self._trader = Trader(scenarios=scenarios)
+            self.after(0, self._finish_refresh_real)
+            self.after(0, self._finish_sync_real_positions)
 
             if self._obsidian:
                 self._trader.obsidian_logger = self._obsidian
@@ -1562,6 +1836,7 @@ class TradingApp(tk.Tk):
         except Exception as e:
             logging.getLogger(__name__).critical(f"실거래 오류: {e}", exc_info=True)
         finally:
+            clear_log_mode()
             self._trader = None
             self._real_running = False
             self.after(0, self._on_real_stopped)
@@ -1588,81 +1863,96 @@ class TradingApp(tk.Tk):
     # ─── 가상거래 내부 실행 ──────────────────────────────────────────────────
 
     def _start_paper(self) -> None:
-        from core.paper_account import PaperAccount
-        from core.paper_engine import PaperEngine, PaperScenario
-        from data.market_data import MarketData
-        from exchange.websocket_manager import WebSocketManager, PriceCache
+        set_log_mode("paper")
+        try:
+            from core.paper_account import PaperAccount
+            from core.paper_engine import PaperEngine, PaperScenario
+            from data.market_data import MarketData
+            from exchange.websocket_manager import WebSocketManager, PriceCache
+            from strategies.registry import load_strategy
 
-        market_data = MarketData()
-        price_cache = PriceCache()
+            market_data = MarketData()
+            price_cache = PriceCache()
 
-        # 종목 수별 캐시 (동일 N은 1회만 API 호출)
-        _ticker_cache: dict[int, list[str]] = {}
-        def _get_top(n: int) -> list[str]:
-            if n not in _ticker_cache:
-                _ticker_cache[n] = MarketData.get_top_tickers_by_volume(n)
-            return _ticker_cache[n]
-
-        all_tickers: set[str] = set()
-        scenarios: list[PaperScenario] = []
-
-        for row in self._paper_rows:
+            all_tickers: set[str] = set()
+            scenarios: list[PaperScenario] = []
             try:
-                balance = float(row.balance_var.get().replace(",", ""))
+                max_n = max(int(r.ticker_count_var.get()) for r in self._paper_rows)
             except ValueError:
-                balance = float(config.PAPER_DEFAULT_BALANCE)
+                max_n = config.PAPER_DEFAULT_TICKER_COUNT
+            pool_size = min(max(max_n * 5, 50), 200)
+            raw_pool = [
+                t for t in MarketData.get_top_tickers_by_volume(pool_size)
+                if t not in set(config.TICKER_BLACKLIST)
+            ]
 
-            try:
-                ticker_count = int(row.ticker_count_var.get())
-            except ValueError:
-                ticker_count = config.PAPER_DEFAULT_TICKER_COUNT
+            for row in self._paper_rows:
+                try:
+                    balance = float(row.balance_var.get().replace(",", ""))
+                except ValueError:
+                    balance = float(config.PAPER_DEFAULT_BALANCE)
 
-            try:
-                budget_pct = float(row.budget_pct_var.get())
-            except ValueError:
-                budget_pct = config.PAPER_DEFAULT_BUDGET_PCT
+                try:
+                    ticker_count = int(row.ticker_count_var.get())
+                except ValueError:
+                    ticker_count = config.PAPER_DEFAULT_TICKER_COUNT
 
-            strat_key = row.strategy_var.get()
-            strat_id, scen_id = STRATEGIES.get(
-                strat_key, (config.SELECTED_STRATEGY, config.SELECTED_SCENARIO)
+                try:
+                    budget_pct = float(row.budget_pct_var.get())
+                except ValueError:
+                    budget_pct = config.PAPER_DEFAULT_BUDGET_PCT
+
+                strat_key = row.strategy_var.get()
+                strat_id, scen_id = STRATEGIES.get(
+                    strat_key, (config.SELECTED_STRATEGY, config.SELECTED_SCENARIO)
+                )
+
+                strategy = load_strategy(market_data, strat_id, scen_id)
+                scenario_tickers = market_data.get_top_tickers_for_strategy(
+                    strategy,
+                    ticker_count,
+                    blacklist=set(config.TICKER_BLACKLIST),
+                    base_tickers=raw_pool,
+                )
+                all_tickers.update(scenario_tickers)
+
+                account = PaperAccount(
+                    account_id=row.name_var.get() or row.account_id,
+                    scenario_id=scen_id,
+                    initial_balance=balance,
+                )
+                scenario = PaperScenario(
+                    account, market_data, strat_id, scen_id,
+                    tickers=scenario_tickers,
+                    ticker_count=ticker_count,
+                    budget_pct=budget_pct,
+                )
+                scenarios.append(scenario)
+
+            ws = WebSocketManager(list(all_tickers), price_cache, log_mode="paper")
+            ws.start()
+            self._paper_ws = ws
+
+            engine = PaperEngine(
+                scenarios=scenarios,
+                market_data=market_data,
+                price_cache=price_cache,
+                tickers=list(all_tickers),
+                ws_manager=ws,
+                obsidian_logger=self._obsidian,
             )
+            self._paper_engine = engine
 
-            scenario_tickers = _get_top(ticker_count)
-            all_tickers.update(scenario_tickers)
+            if self._notif_mgr:
+                self._notif_mgr.set_summary_provider(self._get_paper_summaries)
+                self._notif_mgr.start()
 
-            account = PaperAccount(
-                account_id=row.name_var.get() or row.account_id,
-                scenario_id=scen_id,
-                initial_balance=balance,
+            engine.start()
+            logging.getLogger(__name__).info(
+                f"가상거래 시작 | {len(scenarios)}개 계좌 | 전체 종목: {len(all_tickers)}개"
             )
-            scenario = PaperScenario(
-                account, market_data, strat_id, scen_id,
-                tickers=scenario_tickers,
-                budget_pct=budget_pct,
-            )
-            scenarios.append(scenario)
-
-        ws = WebSocketManager(list(all_tickers), price_cache)
-        ws.start()
-        self._paper_ws = ws
-
-        engine = PaperEngine(
-            scenarios=scenarios,
-            market_data=market_data,
-            price_cache=price_cache,
-            tickers=list(all_tickers),
-            obsidian_logger=self._obsidian,
-        )
-        self._paper_engine = engine
-
-        if self._notif_mgr:
-            self._notif_mgr.set_summary_provider(self._get_paper_summaries)
-            self._notif_mgr.start()
-
-        engine.start()
-        logging.getLogger(__name__).info(
-            f"가상거래 시작 | {len(scenarios)}개 계좌 | 전체 종목: {len(all_tickers)}개"
-        )
+        finally:
+            clear_log_mode()
 
     def _get_paper_summaries(self) -> list[dict]:
         if not self._paper_engine:
@@ -1710,15 +2000,23 @@ class TradingApp(tk.Tk):
         for pos in positions:
             try:
                 price = self._trader.price_cache.get(pos.ticker) or pos.buy_price
-                pnl_pct = (price - pos.buy_price) / pos.buy_price * 100
-                pnl_str = f"{pnl_pct:+.2f}%"
+                pnl_pct = pos.unrealized_pnl_pct(price) * 100
+                pnl_krw = pos.unrealized_pnl_krw(price)
                 tag = "profit" if pnl_pct >= 0 else "loss"
             except Exception:
-                pnl_str, tag = "—", ""
+                price, pnl_pct, pnl_krw, tag = None, None, None, ""
             scen = getattr(pos, "scenario_id", "—") or "—"
+            target_display = self._get_target_display(pos)
             self._real_pos_tree.insert("", "end", tags=(tag,), values=(
-                scen, pos.ticker, f"{pos.buy_price:,.0f}", f"{pos.volume:.8f}",
-                f"{pos.stop_loss_price:,.0f}", pnl_str,
+                scen,
+                pos.ticker,
+                self._format_price(price),
+                self._format_price(pos.buy_price),
+                self._format_volume(pos.volume),
+                self._format_price(pos.stop_loss_price),
+                target_display,
+                "—" if pnl_krw is None else f"{pnl_krw:+,.0f}원",
+                "—" if pnl_pct is None else f"{pnl_pct:+.2f}%",
             ))
 
     def _update_paper_table(self, summaries: list[dict]) -> None:
@@ -1993,13 +2291,13 @@ class TradingApp(tk.Tk):
         if not item:
             return
         vals = self._real_pos_tree.item(item, "values")
-        if not vals or len(vals) < 3:
+        if not vals or len(vals) < 4:
             return
         ticker = vals[1]  # 종목 컬럼
         if not ticker.startswith("KRW-"):
             ticker = f"KRW-{ticker}"
         try:
-            buy_price = float(vals[2].replace(",", ""))
+            buy_price = float(str(vals[3]).replace(",", ""))
         except Exception:
             buy_price = None
         self._show_ticker_chart_window(ticker, buy_price)
@@ -2043,29 +2341,29 @@ class TradingApp(tk.Tk):
         info = tk.Frame(win, bg=C.BG2, padx=10, pady=8)
         info.pack(fill="x")
 
-        tk.Label(info, text=coin, font=("Arial", 14, "bold"),
+        tk.Label(info, text=coin, font=self._ui_font(14, "bold"),
                  fg=C.ACCENT, bg=C.BG2).pack(side="left")
 
         lbl_price = tk.Label(info, text="현재가: 로딩 중...",
-                             font=("Arial", 11), fg=C.FG, bg=C.BG2)
+                             font=self._ui_font(11), fg=C.FG, bg=C.BG2)
         lbl_price.pack(side="left", padx=14)
 
-        lbl_pnl = tk.Label(info, text="", font=("Arial", 11, "bold"),
+        lbl_pnl = tk.Label(info, text="", font=self._ui_font(11, "bold"),
                            fg=C.FG, bg=C.BG2)
         lbl_pnl.pack(side="left")
 
         if buy_price:
-            tk.Label(info, text=f"  매수가: {buy_price:,.0f}원",
-                     font=("Arial", 9), fg=C.SUB, bg=C.BG2).pack(side="left", padx=6)
+            tk.Label(info, text=f"  매수가: {self._format_price(buy_price)}원",
+                     font=self._ui_font(9), fg=C.SUB, bg=C.BG2).pack(side="left", padx=6)
 
         # 버튼들 (오른쪽)
         upbit_url = f"https://upbit.com/exchange?code=CRIX.UPBIT.{ticker}"
-        tk.Button(info, text="↗ 업비트", font=("Arial", 9),
+        tk.Button(info, text="↗ 업비트", font=self._ui_font(9),
                   bg=C.BG3, fg=C.ACCENT, relief="flat", bd=2, padx=6, cursor="hand2",
                   command=lambda: webbrowser.open(upbit_url),
                   ).pack(side="right")
 
-        btn_reload = tk.Button(info, text="↻ 차트 갱신", font=("Arial", 9),
+        btn_reload = tk.Button(info, text="↻ 차트 갱신", font=self._ui_font(9),
                                bg=C.BG3, fg=C.FG, relief="flat", bd=2, padx=6, cursor="hand2")
         btn_reload.pack(side="right", padx=(0, 6))
 
@@ -2074,8 +2372,12 @@ class TradingApp(tk.Tk):
         chart_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         try:
+            import matplotlib
             from matplotlib.figure import Figure
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            matplotlib.rcParams["font.family"] = [self._mpl_font_family, "DejaVu Sans"]
+            matplotlib.rcParams["font.sans-serif"] = [self._mpl_font_family, "DejaVu Sans"]
+            matplotlib.rcParams["axes.unicode_minus"] = False
 
             fig = Figure(figsize=(8, 4.2), dpi=88, facecolor="#1a1b26")
             ax  = fig.add_subplot(111)
@@ -2123,7 +2425,7 @@ class TradingApp(tk.Tk):
                                     label=lbl, alpha=0.85)
                     if buy_price:
                         ax.axhline(buy_price, color="#ff9800", linewidth=1.2,
-                                   linestyle="--", label=f"매수가 {buy_price:,.0f}", alpha=0.9)
+                                   linestyle="--", label=f"매수가 {self._format_price(buy_price)}", alpha=0.9)
                     ax.legend(fontsize=8, facecolor="#252635", edgecolor="#3a3b4e",
                               labelcolor="#c0c0c0", loc="upper left")
                     ax.set_title(f"{coin}  5분봉  (최근 60봉)",
@@ -2157,7 +2459,7 @@ class TradingApp(tk.Tk):
         except ImportError:
             tk.Label(chart_frame,
                      text="matplotlib 미설치\npip install matplotlib",
-                     font=("Arial", 11), fg=C.RED, bg=C.BG,
+                     font=self._ui_font(11), fg=C.RED, bg=C.BG,
                      ).pack(expand=True)
 
         # ── 현재가 3초 자동 갱신 ──
@@ -2166,7 +2468,7 @@ class TradingApp(tk.Tk):
                 return
             price = self._get_current_price(ticker)
             if price:
-                lbl_price.config(text=f"현재가: {price:,.0f}원")
+                lbl_price.config(text=f"현재가: {self._format_price(price)}원")
                 if buy_price:
                     pnl = (price - buy_price) / buy_price * 100
                     lbl_pnl.config(text=f"  {pnl:+.2f}%",
@@ -2193,10 +2495,10 @@ class TradingApp(tk.Tk):
 
     def _append_log(self, msg: str) -> None:
         upper = msg.upper()
-        tag = ("CRITICAL" if "[CRITIC" in upper else
-               "ERROR"    if "[ERROR"  in upper else
-               "WARNING"  if "[WARNIN" in upper else
-               "DEBUG"    if "[DEBUG"  in upper else "INFO")
+        tag = ("CRITICAL" if "CRITICAL" in upper else
+               "ERROR"    if "/ERROR" in upper or "[ERROR" in upper else
+               "WARNING"  if "/WARNING" in upper or "[WARNING" in upper else
+               "DEBUG"    if "/DEBUG" in upper or "[DEBUG" in upper else "INFO")
         self._log_text.config(state="normal")
         self._log_text.insert("end", msg + "\n", tag)
         self._log_text.see("end")
@@ -2269,15 +2571,32 @@ class TradingApp(tk.Tk):
     def _fetch_tickers_bg(self, scenario_info: list[tuple[str, int]] = ()) -> None:
         try:
             from data.market_data import MarketData
+            from strategies.registry import load_strategy
             if scenario_info:
+                md = MarketData()
                 max_n = max(n for _, n in scenario_info)
-                top_tickers = MarketData.get_top_tickers_by_volume(max_n)
+                pool_size = min(max(max_n * 5, 50), 200)
+                top_tickers = [
+                    t for t in MarketData.get_top_tickers_by_volume(pool_size)
+                    if t not in set(config.TICKER_BLACKLIST)
+                ]
                 ticker_strategy_map: dict[str, set[str]] = {}
                 for name, n in scenario_info:
-                    for t in top_tickers[:n]:
+                    strat_id, scen_id = STRATEGIES.get(
+                        name, (config.SELECTED_STRATEGY, config.SELECTED_SCENARIO)
+                    )
+                    strategy = load_strategy(md, strat_id, scen_id)
+                    selected = md.get_top_tickers_for_strategy(
+                        strategy,
+                        n,
+                        blacklist=set(config.TICKER_BLACKLIST),
+                        base_tickers=top_tickers,
+                    )
+                    for t in selected:
                         ticker_strategy_map.setdefault(t, set()).add(name)
+                preview_tickers = [t for t in top_tickers if t in ticker_strategy_map]
                 self.after(0, lambda: self._populate_tickers_preview(
-                    top_tickers, ticker_strategy_map, scenario_info
+                    preview_tickers, ticker_strategy_map, scenario_info
                 ))
             else:
                 tickers = MarketData.get_top_tickers_by_volume(100)

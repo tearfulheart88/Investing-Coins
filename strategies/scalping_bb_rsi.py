@@ -57,6 +57,11 @@ class ScalpingBBRSIStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return False   # 자체 신호로 청산
 
+    def get_history_requirements(self) -> dict[str, int]:
+        return {
+            _INTERVAL: 60,
+        }
+
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
         try:
             adx              = self._md.compute_adx(ticker, _ADX_PERIOD, _INTERVAL)
@@ -117,6 +122,8 @@ class ScalpingBBRSIStrategy(BaseStrategy):
             sl_pct = config.STOP_LOSS_PCT
 
         meta["stop_loss_pct"] = round(sl_pct, 6)
+        meta["tp_price"] = round(mid, 0)
+        meta["tp_label"] = "BB중심"
 
         logger.info(
             f"[scalping_bb_rsi] 매수 신호 | {ticker} | "

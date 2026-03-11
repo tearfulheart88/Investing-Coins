@@ -15,6 +15,7 @@ import threading
 import logging
 import json
 from dataclasses import dataclass
+from logging_.log_context import clear_log_mode, set_log_mode
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +88,15 @@ class OrderbookManager:
     _MAX_BACKOFF_SEC = 60.0
     _BASE_BACKOFF_SEC = 2.0
 
-    def __init__(self, tickers: list[str], cache: OrderbookCache) -> None:
+    def __init__(
+        self,
+        tickers: list[str],
+        cache: OrderbookCache,
+        log_mode: str = "system",
+    ) -> None:
         self._tickers = tickers
         self._cache = cache
+        self._log_mode = log_mode
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._connected = False
@@ -106,7 +113,7 @@ class OrderbookManager:
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
-            name="OrderbookFeed",
+            name=f"OrderbookFeed-{self._log_mode}",
             daemon=True,
         )
         self._thread.start()
@@ -122,6 +129,7 @@ class OrderbookManager:
     def _run_loop(self) -> None:
         import pyupbit
 
+        set_log_mode(self._log_mode)
         backoff = self._BASE_BACKOFF_SEC
         ws = None
 
@@ -160,6 +168,7 @@ class OrderbookManager:
                     except Exception:
                         pass
                     ws = None
+        clear_log_mode()
 
     def _process_message(self, msg: dict) -> None:
         """업비트 orderbook 메시지 파싱 → OrderbookSnapshot."""

@@ -115,6 +115,12 @@ class PumpCatcherStrategy(BaseStrategy):
         # 09:00 스케줄 매도 없음 — 자체 청산 로직(TSL/SL/타임컷)만 사용
         return False
 
+    def get_history_requirements(self) -> dict[str, int]:
+        return {
+            "day": 2,
+            "minute1": max(_VOL_SMA_PERIOD + 1, 28),
+        }
+
     # ─── 포지션 종료 콜백 ─────────────────────────────────────────────────────
 
     def on_position_closed(self, ticker: str, reason: str = "") -> None:
@@ -294,6 +300,8 @@ class PumpCatcherStrategy(BaseStrategy):
                 "gain_from_daily": round(gain_from_daily, 2),
                 "rsi_1m":          round(rsi_1m, 1) if rsi_1m is not None else None,
                 "stop_loss_pct":   _HARD_SL_PCT,   # risk_manager가 SL가를 계산할 때 참조
+                "tp_price":        round(current_price * (1 + _TP_LOCK_PCT / 100), 0),
+                "tp_label":        "수익보존락",
             },
         )
 

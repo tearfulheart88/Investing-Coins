@@ -176,6 +176,40 @@ class OrderStateMachine:
         self._contexts.pop(ticker, None)
         return True
 
+    def sync_position(
+        self,
+        ticker: str,
+        entry_price: float,
+        sl_price: float,
+        filled_qty: float,
+        order_uuid: str = "",
+        identifier: str = "",
+    ) -> None:
+        """
+        이미 보유 중인 포지션을 상태머신에 동기화한다.
+
+        - 재시작 후 positions.json 로드
+        - 거래소 잔고 동기화로 새로 유입된 포지션 등록
+        - 주문 상태 유실 후 매도/손절 복구
+        """
+        self._contexts[ticker] = OrderContext(
+            ticker=ticker,
+            state=OrderState.IN_POSITION,
+            order_uuid=order_uuid,
+            identifier=identifier,
+            entry_price=entry_price,
+            sl_price=sl_price,
+            filled_qty=filled_qty,
+            filled_avg_price=entry_price,
+            entry_confirm_ts=time.time(),
+            entry_timeout_sec=self._entry_timeout,
+            exit_timeout_sec=self._exit_timeout,
+        )
+        logger.info(
+            f"[OrderSM] {ticker} 상태 동기화 → IN_POSITION | "
+            f"entry={entry_price:,.0f} qty={filled_qty:.8f} sl={sl_price:,.0f}"
+        )
+
     # ─── 상태 전이: 매도 ──────────────────────────────────────────────────────
 
     def request_exit(

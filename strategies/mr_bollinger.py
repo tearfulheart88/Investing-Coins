@@ -58,6 +58,12 @@ class BollingerStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return False   # 자체 신호로 청산
 
+    def get_history_requirements(self) -> dict[str, int]:
+        return {
+            _INTERVAL: 60,
+            _HTF_INTERVAL: 195,
+        }
+
     # ─── 매수 신호 ────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
@@ -83,6 +89,8 @@ class BollingerStrategy(BaseStrategy):
             "bb_middle":   round(middle, 0),
             "bb_lower":    round(lower, 0),
             "ema200_4h":   round(ema200_4h, 0),
+            "tp_price":    round(middle, 0),
+            "tp_label":    "BB중심",
         }
 
         # 0. EMA200(4h) 추세 필터 — 하락 추세에서 평균회귀 진입 금지

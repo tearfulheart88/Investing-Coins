@@ -136,6 +136,17 @@ class VBNoiseFilterStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return True
 
+    def get_history_requirements(self) -> dict[str, int]:
+        req = {
+            "day": max(config.MA_PERIOD, config.NOISE_FILTER_DAYS + 1, 3),
+            "minute5": _VOL_SMA_PERIOD + 1,
+        }
+        if _ADX_MIN_VB > 0 or _USE_ATR_TRAIL:
+            req["minute60"] = 60
+        if _EMA200_FILTER:
+            req["minute240"] = 195
+        return req
+
     # ─── 포지션 종료 시 내부 상태 정리 (스케줄매도/외부 매도 공통) ────────────
     def on_position_closed(self, ticker: str, reason: str = "") -> None:
         """
@@ -382,6 +393,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 "vol_ratio": round(vol_ratio, 2),
                 "ema200_4h": round(ema200_4h, 0) if ema200_4h is not None else None,
                 "adx_1h": round(adx_1h, 1) if adx_1h is not None else None,
+                "tp_label": "09:00/동적",
             },
         )
 

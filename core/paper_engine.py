@@ -13,8 +13,9 @@ from zoneinfo import ZoneInfo
 import config
 from core.paper_account import PaperAccount, PaperTrade
 from data.market_data import MarketData
-from exchange.websocket_manager import PriceCache
+from exchange.websocket_manager import PriceCache, WebSocketManager
 from strategies.registry import load_strategy
+from logging_.log_context import clear_log_mode, set_log_mode
 
 logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -30,12 +31,14 @@ class PaperScenario:
         strategy_id: str,
         scenario_id: str,
         tickers: list[str] | None = None,
+        ticker_count: int | None = None,
         budget_per_trade: int | None = None,
         budget_pct: float | None = None,
     ) -> None:
         self.account  = account
         self.strategy = load_strategy(market_data, strategy_id, scenario_id)
         self.tickers  = tickers or list(config.TICKERS)
+        self.ticker_count = ticker_count if ticker_count is not None else len(self.tickers)
         self.budget_per_trade = budget_per_trade or config.BUDGET_PER_TRADE
         self.budget_pct = budget_pct                 # None이면 고정액, 값 있으면 잔고의 N%
         self._daily_buy_tracker: dict[str, date] = {}
@@ -62,113 +65,125 @@ class PaperEngine:
         market_data: MarketData,
         price_cache: PriceCache,
         tickers: list[str],
+        ws_manager: WebSocketManager | None = None,
         obsidian_logger=None,
     ) -> None:
         self._scenarios     = scenarios
         self._market_data   = market_data
         self._price_cache   = price_cache
         self._tickers       = tickers
+        self._ws_manager    = ws_manager
         self._obsidian      = obsidian_logger
         self._stop_event    = threading.Event()
         self._thread: threading.Thread | None = None
         self.running        = False
+        self._history_guard_cache: dict[tuple, tuple[bool, float, str]] = {}
+        self._last_ticker_refresh: float = time.time()
 
     # ─── 시작 / 종료 ─────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        self._stop_event.clear()
-        self.running = True
-        self._thread = threading.Thread(
-            target=self._run_loop, name="PaperEngine", daemon=True
-        )
-        self._thread.start()
-        tickers_info = ", ".join(
-            f"{s.account.account_id}({len(s.tickers)}종목)" for s in self._scenarios
-        )
-        logger.info(f"가상거래 엔진 시작 | 시나리오 {len(self._scenarios)}개 | {tickers_info}")
+        set_log_mode("paper")
+        try:
+            self._stop_event.clear()
+            self.running = True
+            self._thread = threading.Thread(
+                target=self._run_loop, name="PaperEngine", daemon=True
+            )
+            self._thread.start()
+            tickers_info = ", ".join(
+                f"{s.account.account_id}({len(s.tickers)}종목)" for s in self._scenarios
+            )
+            logger.info(f"가상거래 엔진 시작 | 시나리오 {len(self._scenarios)}개 | {tickers_info}")
 
-        # 옵시디언 세션 시작 기록
-        if self._obsidian:
-            try:
-                scenario_info = [
-                    {
-                        "scenario_id": s.account.scenario_id,
-                        "is_paper": True,
-                        "initial_balance": s.account.balance,
-                    }
-                    for s in self._scenarios
-                ]
-                self._obsidian.log_session_start(scenario_info)
-            except Exception as e:
-                logger.warning(f"Obsidian 세션 시작 기록 실패: {e}")
+            # 옵시디언 세션 시작 기록
+            if self._obsidian:
+                try:
+                    scenario_info = [
+                        {
+                            "scenario_id": s.account.scenario_id,
+                            "is_paper": True,
+                            "initial_balance": s.account.balance,
+                        }
+                        for s in self._scenarios
+                    ]
+                    self._obsidian.log_session_start(scenario_info)
+                except Exception as e:
+                    logger.warning(f"Obsidian 세션 시작 기록 실패: {e}")
+        finally:
+            clear_log_mode()
 
     def stop(self) -> None:
-        # ── 종료 전 전 포지션 강제 청산 ──
-        prices = self._price_cache.all_prices()
-        for scenario in self._scenarios:
-            account = scenario.account
-            for ticker in list(account.positions.keys()):
-                price = prices.get(ticker) or account.positions[ticker].buy_price
-                try:
-                    indicators = self._get_indicators(ticker, price)
-                except Exception:
-                    indicators = {}
-                trade = account.execute_sell(ticker, price, "STOP_LIQUIDATION", indicators)
-                if trade:
-                    scenario.strategy.on_position_closed(ticker, reason="STOP_LIQUIDATION")
-                    logger.info(
-                        f"[{account.account_id}] 정지 청산 | "
-                        f"{ticker} | {price:,.0f}원 | PnL={trade.pnl:+,.0f}원"
-                    )
-                    self._log_obsidian(account.scenario_id, trade)
-
-        if self._obsidian:
-            # ── 세션 종료 요약 ──
-            try:
-                summaries = self.get_all_summaries()
-                for s in summaries:
-                    s["is_paper"] = True
-                self._obsidian.log_session_end(summaries)
-            except Exception as e:
-                logger.warning(f"Obsidian 세션 종료 기록 실패: {e}")
-
-            # ── 시나리오별 일보 저장 ──
+        set_log_mode("paper")
+        try:
+            # ── 종료 전 전 포지션 강제 청산 ──
+            prices = self._price_cache.all_prices()
             for scenario in self._scenarios:
+                account = scenario.account
+                for ticker in list(account.positions.keys()):
+                    price = prices.get(ticker) or account.positions[ticker].buy_price
+                    try:
+                        indicators = self._get_indicators(ticker, price)
+                    except Exception:
+                        indicators = {}
+                    trade = account.execute_sell(ticker, price, "STOP_LIQUIDATION", indicators)
+                    if trade:
+                        scenario.strategy.on_position_closed(ticker, reason="STOP_LIQUIDATION")
+                        logger.info(
+                            f"[{account.account_id}] 정지 청산 | "
+                            f"{ticker} | {price:,.0f}원 | PnL={trade.pnl:+,.0f}원"
+                        )
+                        self._log_obsidian(account.scenario_id, trade)
+
+            if self._obsidian:
+                # ── 세션 종료 요약 ──
                 try:
-                    summary = scenario.account.get_summary(prices)
-                    summary["is_paper"] = True
-                    self._obsidian.log_daily_report(
-                        scenario.account.scenario_id,
-                        summary,
-                        scenario.account.trade_history,
+                    summaries = self.get_all_summaries()
+                    for s in summaries:
+                        s["is_paper"] = True
+                    self._obsidian.log_session_end(summaries)
+                except Exception as e:
+                    logger.warning(f"Obsidian 세션 종료 기록 실패: {e}")
+
+                # ── 시나리오별 일보 저장 ──
+                for scenario in self._scenarios:
+                    try:
+                        summary = scenario.account.get_summary(prices)
+                        summary["is_paper"] = True
+                        self._obsidian.log_daily_report(
+                            scenario.account.scenario_id,
+                            summary,
+                            scenario.account.trade_history,
+                            is_paper=True,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Obsidian 일보 실패 [{scenario.account.account_id}]: {e}"
+                        )
+
+            # ── Gemini 분석용 세션 로그 저장 (시나리오별) ───────────────────────────
+            try:
+                from logging_.session_log_writer import paper_trade_to_dict, save_session_log
+                for _scen in self._scenarios:
+                    _acct = _scen.account
+                    _trade_dicts = [paper_trade_to_dict(t) for t in _acct.trade_history]
+                    _summary = _acct.get_summary(prices)
+                    save_session_log(
+                        scenario_id=_acct.scenario_id,
+                        trades=_trade_dicts,
+                        summary=_summary,
                         is_paper=True,
                     )
-                except Exception as e:
-                    logger.warning(
-                        f"Obsidian 일보 실패 [{scenario.account.account_id}]: {e}"
-                    )
+            except Exception as _e:
+                logger.warning(f"Gemini 분석 로그 저장 실패 (paper): {_e}")
 
-        # ── Gemini 분석용 세션 로그 저장 (시나리오별) ───────────────────────────
-        try:
-            from logging_.session_log_writer import paper_trade_to_dict, save_session_log
-            for _scen in self._scenarios:
-                _acct = _scen.account
-                _trade_dicts = [paper_trade_to_dict(t) for t in _acct.trade_history]
-                _summary = _acct.get_summary(prices)
-                save_session_log(
-                    scenario_id=_acct.scenario_id,
-                    trades=_trade_dicts,
-                    summary=_summary,
-                    is_paper=True,
-                )
-        except Exception as _e:
-            logger.warning(f"Gemini 분석 로그 저장 실패 (paper): {_e}")
-
-        self._stop_event.set()
-        self.running = False
-        if self._thread:
-            self._thread.join(timeout=5.0)
-        logger.info("가상거래 엔진 종료")
+            self._stop_event.set()
+            self.running = False
+            if self._thread:
+                self._thread.join(timeout=5.0)
+            logger.info("가상거래 엔진 종료")
+        finally:
+            clear_log_mode()
 
     # ─── 요약 ────────────────────────────────────────────────────────────────
 
@@ -182,34 +197,47 @@ class PaperEngine:
     # ─── 메인 루프 ───────────────────────────────────────────────────────────
 
     def _run_loop(self) -> None:
-        logger.info("가상거래 루프 시작")
-        _last_daily_sell_date: date | None = None   # 오늘 스케줄 매도 완료 추적
+        set_log_mode("paper")
+        try:
+            logger.info("가상거래 루프 시작")
+            _last_daily_sell_date: date | None = None   # 오늘 스케줄 매도 완료 추적
 
-        while not self._stop_event.is_set():
-            loop_start = time.time()
-            now_kst    = datetime.now(KST)
-            today      = now_kst.date()
+            while not self._stop_event.is_set():
+                loop_start = time.time()
+                now_kst = datetime.now(KST)
+                today = now_kst.date()
 
-            # ── 09:00 KST 스케줄 매도 (VB 전략 대상, 하루 1회) ──────────────
-            if (
-                now_kst.hour   == config.SELL_HOUR_KST
-                and now_kst.minute == config.SELL_MINUTE_KST
-                and today != _last_daily_sell_date
-            ):
-                _last_daily_sell_date = today
-                self._execute_daily_sell()
+                # ── 전략별 거래대상 종목 주기 갱신 (기본 1시간) ──────────────────
+                refresh_sec = config.TICKER_REFRESH_HOURS * 3600
+                if refresh_sec > 0 and (time.time() - self._last_ticker_refresh) >= refresh_sec:
+                    self._refresh_scenario_tickers()
+                    self._last_ticker_refresh = time.time()
 
-            for scenario in self._scenarios:
-                if self._stop_event.is_set():
-                    break
-                for ticker in scenario.tickers:
-                    try:
-                        self._process(scenario, ticker)
-                    except Exception as e:
-                        logger.warning(f"[{scenario.account.account_id}][{ticker}] 처리 오류: {e}", exc_info=True)
+                # ── 09:00 KST 스케줄 매도 (VB 전략 대상, 하루 1회) ──────────────
+                if (
+                    now_kst.hour == config.SELL_HOUR_KST
+                    and now_kst.minute == config.SELL_MINUTE_KST
+                    and today != _last_daily_sell_date
+                ):
+                    _last_daily_sell_date = today
+                    self._execute_daily_sell()
 
-            elapsed = time.time() - loop_start
-            self._stop_event.wait(timeout=max(0.0, config.PRICE_CHECK_INTERVAL_SEC - elapsed))
+                for scenario in self._scenarios:
+                    if self._stop_event.is_set():
+                        break
+                    for ticker in scenario.tickers:
+                        try:
+                            self._process(scenario, ticker)
+                        except Exception as e:
+                            logger.warning(
+                                f"[{scenario.account.account_id}][{ticker}] 처리 오류: {e}",
+                                exc_info=True,
+                            )
+
+                elapsed = time.time() - loop_start
+                self._stop_event.wait(timeout=max(0.0, config.PRICE_CHECK_INTERVAL_SEC - elapsed))
+        finally:
+            clear_log_mode()
 
     def _execute_daily_sell(self) -> None:
         """
@@ -264,6 +292,62 @@ class PaperEngine:
                     )
 
         logger.info("[PaperEngine] 09:00 스케줄 매도 완료")
+
+    def _refresh_scenario_tickers(self) -> None:
+        """
+        가상거래 시나리오별 종목 갱신.
+
+        - 전략별 최소 히스토리를 만족하는 종목만 선별
+        - 이미 보유 중인 종목은 매도 전까지 유지
+        - 활성 종목 변경 시 WebSocket 구독도 함께 갱신
+        """
+        logger.info("[PaperEngine] 전략별 거래대상 종목 갱신 시작...")
+
+        all_tickers: set[str] = set()
+        combined_blacklist = set(config.TICKER_BLACKLIST)
+        try:
+            max_pool = min(max((s.ticker_count for s in self._scenarios), default=10) * 5, 200)
+            base_tickers = [
+                t for t in MarketData.get_top_tickers_by_volume(max_pool)
+                if t not in combined_blacklist
+            ]
+        except Exception as e:
+            logger.warning(f"[PaperEngine] 종목 풀 조회 실패 → 기존 목록 유지: {e}")
+            return
+
+        for scenario in self._scenarios:
+            try:
+                held = list(scenario.account.positions.keys())
+                new_tickers = self._market_data.get_top_tickers_for_strategy(
+                    scenario.strategy,
+                    scenario.ticker_count,
+                    blacklist=combined_blacklist,
+                    must_keep=held,
+                    base_tickers=base_tickers,
+                )
+
+                added = set(new_tickers) - set(scenario.tickers)
+                removed = set(scenario.tickers) - set(new_tickers)
+                if added or removed:
+                    logger.info(
+                        f"[{scenario.account.account_id}] 종목 갱신 | "
+                        f"추가={sorted(added)[:3]} | 제거={sorted(removed)[:3]}"
+                    )
+
+                scenario.tickers = new_tickers
+                all_tickers.update(new_tickers)
+            except Exception as e:
+                logger.warning(
+                    f"[{scenario.account.account_id}] 종목 갱신 실패 → 기존 유지: {e}"
+                )
+                all_tickers.update(scenario.tickers)
+
+        new_active = list(all_tickers)
+        if set(new_active) != set(self._tickers):
+            self._tickers = new_active
+            if self._ws_manager:
+                self._ws_manager.update_tickers(new_active)
+            logger.info(f"[PaperEngine] 활성 종목 갱신 완료 | 전체 {len(new_active)}개")
 
     def _process(self, scenario: PaperScenario, ticker: str) -> None:
         account  = scenario.account
@@ -322,6 +406,10 @@ class PaperEngine:
             if strategy.requires_scheduled_sell() and scenario.already_bought_today(ticker):
                 return
 
+            history_ok, _ = self._has_required_history(scenario, ticker)
+            if not history_ok:
+                return
+
             buy_signal = strategy.should_buy(ticker, price)
             if buy_signal.should_buy:
                 indicators = self._get_indicators(ticker, price)
@@ -347,6 +435,31 @@ class PaperEngine:
                         f"잔고: {account.balance:,.0f}원"
                     )
                     self._log_obsidian(scenario.account.scenario_id, trade)
+
+    def _has_required_history(
+        self, scenario: PaperScenario, ticker: str
+    ) -> tuple[bool, str]:
+        requirements = scenario.strategy.get_history_requirements()
+        if not requirements:
+            return True, ""
+
+        signature = tuple(sorted(requirements.items()))
+        cache_key = (scenario.account.scenario_id, ticker, signature)
+        now = time.time()
+        cached = self._history_guard_cache.get(cache_key)
+        if cached:
+            ok, expire_at, reason = cached
+            if now < expire_at:
+                return ok, reason
+
+        ok, reason = self._market_data.has_sufficient_history(ticker, requirements)
+        ttl_sec = 300.0 if ok else 1800.0
+        self._history_guard_cache[cache_key] = (ok, now + ttl_sec, reason)
+
+        if not ok:
+            logger.info(f"[HistoryGuard][{scenario.account.scenario_id}] {reason}")
+
+        return ok, reason
 
     # ─── 지표 수집 ───────────────────────────────────────────────────────────
 

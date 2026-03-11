@@ -3,6 +3,7 @@ import time
 import threading
 import logging
 import pyupbit
+from logging_.log_context import clear_log_mode, set_log_mode
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +59,15 @@ class WebSocketManager:
     _BASE_BACKOFF_SEC = 1.0
     _WS_GET_TIMEOUT_SEC = 2.0
 
-    def __init__(self, tickers: list[str], cache: PriceCache) -> None:
+    def __init__(
+        self,
+        tickers: list[str],
+        cache: PriceCache,
+        log_mode: str = "system",
+    ) -> None:
         self._tickers = tickers
         self._cache = cache
+        self._log_mode = log_mode
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._ws = None
@@ -80,7 +87,7 @@ class WebSocketManager:
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run_loop,
-            name="WebSocketPriceFeed",
+            name=f"WebSocketPriceFeed-{self._log_mode}",
             daemon=True,
         )
         self._thread.start()
@@ -99,7 +106,28 @@ class WebSocketManager:
             self._thread.join(timeout=5.0)
         logger.info("WebSocket 피드 종료")
 
+    def update_tickers(self, tickers: list[str]) -> bool:
+        """
+        구독 종목 목록 갱신.
+        실행 중이면 같은 캐시를 유지한 채 재시작한다.
+        """
+        new_tickers = list(dict.fromkeys(tickers))
+        if set(new_tickers) == set(self._tickers):
+            return False
+
+        was_running = self._thread is not None and self._thread.is_alive()
+        if was_running:
+            self.stop()
+
+        self._tickers = new_tickers
+        if was_running:
+            self.start()
+
+        logger.info(f"WebSocket 구독 종목 갱신: {self._tickers[:5]}")
+        return True
+
     def _run_loop(self) -> None:
+        set_log_mode(self._log_mode)
         backoff = self._BASE_BACKOFF_SEC
         fail_count = 0
 
@@ -153,6 +181,7 @@ class WebSocketManager:
                     except Exception:
                         pass
                     self._ws = None
+        clear_log_mode()
 
     def _parse_message(self, msg: dict) -> tuple[str | None, float | None]:
         """업비트 WebSocket ticker 메시지에서 (ticker, price) 추출"""

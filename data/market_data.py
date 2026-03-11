@@ -30,13 +30,18 @@ class MarketData:
 
     _INTRADAY_CACHE_SEC: float  = 30.0   # 분봉 캐시 유효 시간(초)
     _MAX_INTRADAY_COUNT: int   = 200    # Upbit API 최대 캔들 수
-    _MIN_API_INTERVAL:   float = 0.12   # 연속 API 호출 최소 간격(초) — rate limit 방어
+    _MIN_API_INTERVAL:   float = 0.12   # 연속 API 호출 최소 간격(초) - rate limit 방어
+    _LIVE_TICKERS_CACHE_SEC: float = 300.0
+    _live_tickers_cache: tuple[list[str], float] | None = None
+    _live_tickers_lock = threading.Lock()
 
     def __init__(self) -> None:
         # 일봉 캐시: ticker → (df, cache_date, cached_count)
         self._cache: dict[str, tuple[pd.DataFrame, date, int]] = {}
         # 분봉 캐시: (ticker, interval) → (df, fetch_timestamp)
         self._intraday_cache: dict[tuple, tuple[pd.DataFrame, float]] = {}
+        # 히스토리 충족 여부 캐시: (ticker, requirements_signature) → (ok, reason, expire_ts)
+        self._history_check_cache: dict[tuple, tuple[bool, str, float]] = {}
         # API rate limit 제어
         self._api_lock = threading.Lock()
         self._last_api_call: float = 0.0
@@ -211,14 +216,53 @@ class MarketData:
     # ─── 거래량 상위 종목 ─────────────────────────────────────────────────────
 
     @staticmethod
+    def get_live_krw_tickers(force_refresh: bool = False) -> list[str]:
+        """
+        현재 거래 가능한 KRW 마켓 목록을 캐시와 함께 반환한다.
+        """
+        now_ts = time.time()
+        with MarketData._live_tickers_lock:
+            cached = MarketData._live_tickers_cache
+            if (
+                not force_refresh
+                and cached is not None
+                and (now_ts - cached[1]) < MarketData._LIVE_TICKERS_CACHE_SEC
+            ):
+                return list(cached[0])
+
+            tickers = pyupbit.get_tickers(fiat="KRW")
+            if not tickers:
+                raise DataFetchError("KRW 종목 목록 조회 실패")
+
+            filtered = [ticker for ticker in tickers if ticker not in _TICKER_BLACKLIST]
+            MarketData._live_tickers_cache = (filtered, now_ts)
+            return list(filtered)
+
+    @staticmethod
+    def filter_supported_tickers(
+        tickers: list[str],
+        *,
+        must_keep: set[str] | None = None,
+    ) -> list[str]:
+        """
+        현재 지원되지 않는 티커를 제거하되, must_keep은 강제로 유지한다.
+        """
+        keep = set(must_keep or set())
+        supported = set(MarketData.get_live_krw_tickers())
+        out: list[str] = []
+        for ticker in tickers:
+            if ticker in keep or ticker in supported:
+                if ticker not in out:
+                    out.append(ticker)
+        return out
+
+    @staticmethod
     def get_top_tickers_by_volume(n: int = 100) -> list[str]:
         """
         업비트 KRW 마켓에서 24시간 거래대금 기준 상위 n개 종목 반환.
         """
-        # 1. 전체 KRW 종목 목록
-        tickers = pyupbit.get_tickers(fiat="KRW")
-        if not tickers:
-            raise DataFetchError("KRW 종목 목록 조회 실패")
+        # 1. 현재 거래 가능한 KRW 종목 목록
+        tickers = MarketData.get_live_krw_tickers()
 
         # 2. 배치(100개)로 24h 시세 조회
         url = "https://api.upbit.com/v1/ticker"
@@ -238,11 +282,7 @@ class MarketData:
             key=lambda x: float(x.get("acc_trade_price_24h") or 0),
             reverse=True,
         )
-        # 4. 스테이블코인 블랙리스트 제외
-        return [
-            d["market"] for d in all_data
-            if d["market"] not in _TICKER_BLACKLIST
-        ][:n]
+        return [d["market"] for d in all_data if d["market"] in tickers][:n]
 
     # ─── 분봉 OHLCV (스캘핑 전략용) ─────────────────────────────────────────
 
@@ -691,3 +731,94 @@ class MarketData:
         vol_sma = float(vol.rolling(period).mean().iloc[-1])
         vol_cur = float(vol.iloc[-1])
         return vol_cur, vol_sma
+
+    def has_sufficient_history(
+        self, ticker: str, requirements: dict[str, int]
+    ) -> tuple[bool, str]:
+        """
+        전략 평가 전에 필요한 최소 봉 수 충족 여부 검사.
+
+        requirements 예시:
+          {"day": 15, "minute60": 200, "minute5": 60}
+        """
+        signature = tuple(sorted(requirements.items()))
+        cache_key = (ticker, signature)
+        now_ts = time.time()
+        cached = self._history_check_cache.get(cache_key)
+        if cached and now_ts < cached[2]:
+            return cached[0], cached[1]
+
+        missing: list[str] = []
+
+        for interval, needed in requirements.items():
+            if needed <= 0:
+                continue
+
+            try:
+                if interval == "day":
+                    df = self.get_ohlcv(ticker, count=needed)
+                else:
+                    df = self.get_ohlcv_intraday(ticker, interval=interval, count=needed)
+                got = len(df) if df is not None else 0
+            except DataFetchError as e:
+                missing.append(f"{interval}=ERR({e})")
+                continue
+
+            if got < needed:
+                missing.append(f"{interval}={got}/{needed}")
+
+        if missing:
+            reason = f"{ticker} 히스토리 부족 | " + ", ".join(missing)
+            self._history_check_cache[cache_key] = (False, reason, now_ts + 1800.0)
+            return False, reason
+
+        self._history_check_cache[cache_key] = (True, "", now_ts + 300.0)
+        return True, ""
+
+    def get_top_tickers_for_strategy(
+        self,
+        strategy,
+        n: int,
+        blacklist: set[str] | None = None,
+        must_keep: list[str] | None = None,
+        base_tickers: list[str] | None = None,
+        pool_size: int | None = None,
+    ) -> list[str]:
+        """
+        전략별 최소 히스토리를 만족하는 거래대금 상위 종목만 선별한다.
+
+        - n: 신규 스캔 대상 개수
+        - must_keep: 이미 보유 중이라 refresh 이후에도 계속 봐야 하는 종목
+        - 반환값은 `선별 종목 + must_keep(중복 제거)` 형태이며, 보유 종목 수만큼
+          최종 길이는 n을 초과할 수 있다.
+        """
+        if n <= 0 and not must_keep:
+            return []
+
+        keep_list = list(dict.fromkeys(must_keep or []))
+        keep_set = set(keep_list)
+        blk = set(blacklist or set())
+        requirements = strategy.get_history_requirements()
+
+        if base_tickers is None:
+            effective_pool = pool_size if pool_size is not None else min(max(n * 5, 50), 200)
+            base_tickers = self.get_top_tickers_by_volume(effective_pool)
+
+        selected: list[str] = []
+        for ticker in base_tickers:
+            if ticker in blk or ticker in keep_set or ticker in selected:
+                continue
+
+            ok, _ = self.has_sufficient_history(ticker, requirements)
+            if not ok:
+                continue
+
+            selected.append(ticker)
+            if len(selected) >= n:
+                break
+
+        for ticker in keep_list:
+            if ticker not in selected:
+                selected.append(ticker)
+
+        return selected

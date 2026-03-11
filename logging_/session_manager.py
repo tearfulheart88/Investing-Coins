@@ -31,6 +31,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import config
+from logging_.log_context import AllowTradeModesFilter, InjectTradeModeFilter
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,8 @@ class SessionManager:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         self._file_handler.setFormatter(fmt)
+        self._file_handler.addFilter(InjectTradeModeFilter())
+        self._file_handler.addFilter(AllowTradeModesFilter("real"))
         logging.getLogger().addHandler(self._file_handler)
 
         logger.info(

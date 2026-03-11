@@ -91,6 +91,13 @@ class SMRHStopStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return False   # 신호 기반 청산 (TP/SL) → 동일 종목 재진입 가능
 
+    def get_history_requirements(self) -> dict[str, int]:
+        return {
+            "day": _MA_PERIOD,
+            _INTERVAL_4H: max(_MACD_SLOW + _MACD_SIGNAL + 3, 56),
+            _INTERVAL_30M: max(_MACD_SLOW + _MACD_SIGNAL + 3, 50),
+        }
+
     # ─── 매수 신호 ────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
@@ -212,6 +219,7 @@ class SMRHStopStrategy(BaseStrategy):
 
         breakout_target = float(turned_rows.iloc[-1]["high"])
         meta["ha_breakout_target"] = round(breakout_target, 0)
+        meta["tp_label"] = "HA/MACD 약화"
 
         if current_price <= breakout_target:
             logger.debug(

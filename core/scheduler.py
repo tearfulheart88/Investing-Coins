@@ -4,6 +4,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from zoneinfo import ZoneInfo
 import config
+from logging_.log_context import clear_log_mode, set_log_mode
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class TradingScheduler:
 
     def _scheduled_sell_job(self) -> None:
         """전략이 requires_scheduled_sell()이면 전 포지션 매도"""
+        set_log_mode("real")
         try:
             strategy = self._trader.strategy
             if not strategy.requires_scheduled_sell():
@@ -102,17 +104,23 @@ class TradingScheduler:
             logger.info("=== 09:00 스케줄 매도 완료 ===")
         except Exception as e:
             logger.critical(f"스케줄 매도 Job 예외: {e}", exc_info=True)
+        finally:
+            clear_log_mode()
 
     def _invalidate_cache_job(self) -> None:
         """신규 일봉 데이터 반영을 위해 OHLCV 캐시 초기화"""
+        set_log_mode("real")
         try:
             self._market_data.invalidate_cache()
             logger.info("OHLCV 캐시 무효화 완료 (새 캔들 반영)")
         except Exception as e:
             logger.error(f"캐시 무효화 Job 예외: {e}", exc_info=True)
+        finally:
+            clear_log_mode()
 
     def _equity_snapshot_job(self) -> None:
         """포트폴리오 평가금액 주기적 로깅"""
+        set_log_mode("real")
         try:
             equity = self._trader.risk.get_total_equity()
             self._trader.state.update_peak_equity(equity)
@@ -122,3 +130,5 @@ class TradingScheduler:
             )
         except Exception as e:
             logger.warning(f"Equity 스냅샷 실패: {e}")
+        finally:
+            clear_log_mode()

@@ -64,6 +64,12 @@ class VBStandardStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return True
 
+    def get_history_requirements(self) -> dict[str, int]:
+        return {
+            "day": max(_NOISE_FILTER_DAYS + 1, 3),
+            "minute5": _VOL_SMA_PERIOD + 1,
+        }
+
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
         try:
             k_raw            = self._md.compute_noise_filter_k(ticker, days=_NOISE_FILTER_DAYS)
@@ -104,6 +110,7 @@ class VBStandardStrategy(BaseStrategy):
                 "k_raw": round(k_raw, 4),
                 "target_price": round(target_price, 0),
                 "vol_ratio": round(vol_ratio, 2),
+                "tp_label": "09:00/동적",
             },
         )
 

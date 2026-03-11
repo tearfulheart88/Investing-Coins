@@ -21,6 +21,7 @@ from core.position_sizer import PositionSizer
 from core.order_state_machine import OrderStateMachine, OrderState
 from logging_.trade_logger import TradeLogger, TradeRecord, now_kst
 from logging_.session_manager import SessionManager
+from logging_.log_context import clear_log_mode, set_log_mode
 
 logger = logging.getLogger(__name__)
 
@@ -114,14 +115,19 @@ class Trader:
                 refresh_hours=config.TICKER_REFRESH_HOURS,
             )
             try:
-                self._active_tickers = self._ticker_manager.get_current_tickers()
+                self._active_tickers = self.market_data.get_top_tickers_for_strategy(
+                    self.strategy,
+                    config.TOP_TICKERS_COUNT,
+                    blacklist=set(config.TICKER_BLACKLIST),
+                )
+                self._scenarios[0].tickers = list(self._active_tickers)
                 logger.info(f"동적 종목 로드 완료: {self._active_tickers}")
-            except RuntimeError as e:
+            except Exception as e:
                 logger.warning(f"동적 종목 로드 실패 → config.TICKERS 폴백: {e}")
                 self._active_tickers = list(config.TICKERS)
 
         # WebSocket 피드: _active_tickers로 구독
-        self.ws   = WebSocketManager(self._active_tickers, self.price_cache)
+        self.ws   = WebSocketManager(self._active_tickers, self.price_cache, log_mode="real")
         self.risk = RiskManager(self.client, self.state, self.price_cache)
         self.trade_logger    = TradeLogger()
         first_scenario_id = self._scenarios[0].scenario_id
@@ -133,7 +139,11 @@ class Trader:
         self.orderbook_cache = OrderbookCache()
         self._ob_manager: OrderbookManager | None = None
         if config.ORDERBOOK_WS_ENABLED:
-            self._ob_manager = OrderbookManager(self._active_tickers, self.orderbook_cache)
+            self._ob_manager = OrderbookManager(
+                self._active_tickers,
+                self.orderbook_cache,
+                log_mode="real",
+            )
 
         # ── AutoTuner (ATR% 기반 파라미터 자동 조정) ──────────────────────────
         self.auto_tuner: AutoTuner | None = None
@@ -172,6 +182,7 @@ class Trader:
 
         # 거래 잠금: 스케줄러(09:00매도)와 메인루프 동시 실행 방지
         self._trade_lock = threading.Lock()
+        self._ticker_refresh_lock = threading.Lock()
 
         # Obsidian 일보용 세션 거래 누적
         self._obs_session_trades: list = []   # PaperTrade 객체 리스트
@@ -194,6 +205,10 @@ class Trader:
         # 거래소 주기 동기화 타임스탬프 (외부 매수 / 응답 유실 포지션 복구)
         self._last_exchange_sync: float = 0.0
 
+        # 전략별 히스토리 부족 검사 캐시
+        # key: (scenario_id, ticker, requirements_signature)
+        self._history_guard_cache: dict[tuple, tuple[bool, float, str]] = {}
+
         # 정상 종료 플래그
         self._running = False
 
@@ -210,22 +225,129 @@ class Trader:
             f"호가WS: {'ON' if config.ORDERBOOK_WS_ENABLED else 'OFF'}"
         )
 
+    def _sync_order_states_from_positions(self) -> None:
+        """현재 보유 포지션을 OrderStateMachine에 반영한다."""
+        for pos in self.state.all_positions():
+            if self.order_sm.get_state(pos.ticker) != OrderState.IDLE:
+                continue
+            self.order_sm.sync_position(
+                ticker=pos.ticker,
+                entry_price=pos.buy_price,
+                sl_price=pos.stop_loss_price,
+                filled_qty=pos.volume,
+                order_uuid=pos.order_uuid,
+            )
+
+    def _ensure_order_state_for_position(self, position: Position) -> None:
+        """상태머신 컨텍스트가 유실된 포지션을 즉시 복구한다."""
+        if self.order_sm.is_in_position(position.ticker) or self.order_sm.has_pending_order(position.ticker):
+            return
+        self.order_sm.sync_position(
+            ticker=position.ticker,
+            entry_price=position.buy_price,
+            sl_price=position.stop_loss_price,
+            filled_qty=position.volume,
+            order_uuid=position.order_uuid,
+        )
+        logger.warning(
+            f"[OrderSM] 컨텍스트 복구 | {position.ticker} | "
+            f"buy={position.buy_price:,.0f} sl={position.stop_loss_price:,.0f}"
+        )
+
+    def _filter_active_tickers(self, tickers: list[str]) -> list[str]:
+        """현재 거래 가능한 종목만 남기되, 보유 포지션은 유지한다."""
+        must_keep = {pos.ticker for pos in self.state.all_positions()}
+        try:
+            filtered = self.market_data.filter_supported_tickers(tickers, must_keep=must_keep)
+        except Exception as e:
+            logger.warning(f"[Trader] 지원 종목 확인 실패 → 기존 목록 유지: {e}")
+            return list(dict.fromkeys(tickers))
+
+        if len(filtered) != len(tickers):
+            removed = sorted(set(tickers) - set(filtered))
+            if removed:
+                logger.info(f"[Trader] 미지원/비활성 종목 제외: {removed[:5]}")
+        return filtered
+
+    def refresh_tickers_now(self) -> None:
+        """실행 중 즉시 거래 대상 종목을 새로고침한다."""
+        set_log_mode("real")
+        try:
+            if self._ticker_manager:
+                if self.universe_selector:
+                    new_tickers = self.universe_selector.select_top_n(self._ticker_manager.n)
+                else:
+                    new_tickers = self.market_data.get_top_tickers_for_strategy(
+                        self.strategy,
+                        self._ticker_manager.n,
+                        blacklist=set(config.TICKER_BLACKLIST) | self._runtime_blacklist,
+                    )
+                self._update_active_tickers(new_tickers)
+            elif self._multi_scenario_mode:
+                self._refresh_scenario_tickers()
+            self._last_ticker_refresh = time.time()
+            logger.info("[Trader] 수동 종목 새로고침 완료")
+        finally:
+            clear_log_mode()
+
+    def sync_exchange_positions_now(self, *, reason: str = "manual") -> dict[str, list[str]]:
+        """거래소 실제 잔고와 내부 포지션을 즉시 동기화한다."""
+        set_log_mode("real")
+        try:
+            first_sid = self._scenarios[0].scenario_id
+            result = self.state.sync_with_exchange(
+                self.client,
+                tickers=None,
+                default_scenario_id=first_sid,
+            )
+
+            for ticker in result["removed"]:
+                self.order_sm.reset(ticker)
+
+            for ticker in result["added"] + result["updated"]:
+                pos = self.state.get_position(ticker)
+                if pos is None:
+                    continue
+                self.order_sm.sync_position(
+                    ticker=pos.ticker,
+                    entry_price=pos.buy_price,
+                    sl_price=pos.stop_loss_price,
+                    filled_qty=pos.volume,
+                    order_uuid=pos.order_uuid,
+                )
+
+            desired_active: list[str] = []
+            for scenario in self._scenarios:
+                desired_active.extend(scenario.tickers)
+            desired_active.extend(pos.ticker for pos in self.state.all_positions())
+            self._update_active_tickers(list(dict.fromkeys(desired_active)))
+            self._last_exchange_sync = time.time()
+
+            logger.info(
+                f"[Trader] 거래소 포지션 동기화({reason}) | "
+                f"추가={result['added']} | 제거={result['removed']} | 갱신={result['updated']}"
+            )
+            return result
+        finally:
+            clear_log_mode()
+
     # ─── 시작 / 종료 ─────────────────────────────────────────────────────────
 
     def start(self) -> None:
         """시스템 시작. 메인 스레드 블로킹."""
+        set_log_mode("real")
         self.state.load()
-        self.state.reconcile_with_exchange(self.client)
 
         # ── 계좌 전체 보유 코인 자동 등록 ───────────────────────────────────
         # tickers=None → 시스템 외부에서 매수한 코인 포함 계좌 전체 동기화
         # 등록된 포지션은 첫 번째 시나리오 ID로 배정되어 orphan 루프에서 매도/손절 처리
         first_scenario_id = self._scenarios[0].scenario_id
-        imported = self.state.sync_from_exchange(
+        sync_result = self.state.sync_with_exchange(
             self.client,
             tickers=None,
             default_scenario_id=first_scenario_id,
         )
+        imported = sync_result["added"]
 
         # 새로 등록된 코인이 있으면 WebSocket 구독 목록과 active_tickers에 추가
         # (ws.start() 전에 추가해야 연결 시 전체 종목 구독)
@@ -284,6 +406,17 @@ class Trader:
         else:
             logger.info("Orphan 포지션 없음 (모든 포지션 시나리오 정합)")
 
+        held_tickers = {pos.ticker for pos in self.state.all_positions()}
+        for scenario in self._scenarios:
+            scenario.tickers = self.market_data.filter_supported_tickers(
+                scenario.tickers,
+                must_keep=held_tickers,
+            )
+
+        self._sync_order_states_from_positions()
+        self._active_tickers = self._filter_active_tickers(self._active_tickers)
+        self.ws._tickers = self._active_tickers
+
         current_equity = self.risk.get_total_equity()
         self._session_start_equity = current_equity   # Obsidian 일보용 기준 자산
         self.state.update_peak_equity(current_equity)
@@ -311,77 +444,88 @@ class Trader:
             f"equity={current_equity:,.0f}원 ==="
         )
         self._running = True
-        self._run_buy_loop()
+        try:
+            self._run_buy_loop()
+        finally:
+            clear_log_mode()
 
     def stop(self) -> None:
         """정상 종료"""
-        logger.info("시스템 종료 요청...")
-        self._running = False
-        self.scheduler.stop()
-        self.ws.stop()
-        if self._ob_manager:
-            self._ob_manager.stop()
-        self.order_sm.reset()
-        self.state.save()
-
-        # ── 세션 로깅 종료 + 결과 수집 ──────────────────────────────────────
+        set_log_mode("real")
         try:
-            equity = self.risk.get_total_equity()
-            session_summary = self._build_obs_summary(equity)
-            # 현재 포지션 스냅샷
-            positions_snap = {
-                p.ticker: {
-                    "volume": p.volume,
-                    "buy_price": p.buy_price,
-                    "buy_time": p.buy_time,
-                    "krw_spent": p.krw_spent,
-                    "stop_loss_price": p.stop_loss_price,
-                    "strategy_id": p.strategy_id,
-                    "scenario_id": p.scenario_id,
-                    "side": p.side,
-                    "leverage": p.leverage,
-                }
-                for p in self.state.all_positions()
-            }
-            self.session_manager.finalize(
-                summary=session_summary,
-                positions_snapshot=positions_snap,
-            )
-            self.trade_logger.set_session_id(None)
-        except Exception as e:
-            logger.warning(f"세션 로깅 종료 실패: {e}")
+            logger.info("시스템 종료 요청...")
+            self._running = False
+            self.scheduler.stop()
+            self.ws.stop()
+            if self._ob_manager:
+                self._ob_manager.stop()
+            self.order_sm.reset()
+            self.state.save()
 
-        # ── Gemini 분석용 세션 로그 저장 ──────────────────────────────────────
-        try:
-            from logging_.session_log_writer import paper_trade_to_dict, save_session_log
-            trade_dicts = [paper_trade_to_dict(t) for t in self._obs_session_trades]
-            equity_now  = self.risk.get_total_equity()
-            save_session_log(
-                scenario_id=self.strategy.get_scenario_id(),
-                trades=trade_dicts,
-                summary=self._build_obs_summary(equity_now),
-                is_paper=False,
-            )
-        except Exception as _e:
-            logger.warning(f"Gemini 분석 로그 저장 실패: {_e}")
-
-        # ── Obsidian 세션 종료 + 일보 저장 ──────────────────────────────────
-        if self.obsidian_logger:
+            # ── 세션 로깅 종료 + 결과 수집 ──────────────────────────────────────
             try:
-                equity  = self.risk.get_total_equity()
-                summary = self._build_obs_summary(equity)
-                self.obsidian_logger.log_session_end([{**summary, "is_paper": False}])
-                self.obsidian_logger.log_daily_report(
-                    self.strategy.get_scenario_id(),
-                    summary,
-                    self._obs_session_trades,
+                equity = self.risk.get_total_equity()
+                session_summary = self._build_obs_summary(equity)
+                # 현재 포지션 스냅샷
+                positions_snap = {
+                    p.ticker: {
+                        "volume": p.volume,
+                        "buy_price": p.buy_price,
+                        "buy_time": p.buy_time,
+                        "krw_spent": p.krw_spent,
+                        "stop_loss_price": p.stop_loss_price,
+                        "take_profit_price": p.take_profit_price,
+                        "take_profit_label": p.take_profit_label,
+                        "locked_profit_price": p.locked_profit_price,
+                        "strategy_id": p.strategy_id,
+                        "scenario_id": p.scenario_id,
+                        "side": p.side,
+                        "leverage": p.leverage,
+                        "entry_metadata": p.entry_metadata,
+                    }
+                    for p in self.state.all_positions()
+                }
+                self.session_manager.finalize(
+                    summary=session_summary,
+                    positions_snapshot=positions_snap,
+                )
+                self.trade_logger.set_session_id(None)
+            except Exception as e:
+                logger.warning(f"세션 로깅 종료 실패: {e}")
+
+            # ── Gemini 분석용 세션 로그 저장 ──────────────────────────────────────
+            try:
+                from logging_.session_log_writer import paper_trade_to_dict, save_session_log
+                trade_dicts = [paper_trade_to_dict(t) for t in self._obs_session_trades]
+                equity_now = self.risk.get_total_equity()
+                save_session_log(
+                    scenario_id=self.strategy.get_scenario_id(),
+                    trades=trade_dicts,
+                    summary=self._build_obs_summary(equity_now),
                     is_paper=False,
                 )
-                logger.info("Obsidian 세션 종료 + 일보 저장 완료")
-            except Exception as e:
-                logger.warning(f"Obsidian 종료 기록 실패: {e}")
+            except Exception as _e:
+                logger.warning(f"Gemini 분석 로그 저장 실패: {_e}")
 
-        logger.info("시스템 종료 완료")
+            # ── Obsidian 세션 종료 + 일보 저장 ──────────────────────────────────
+            if self.obsidian_logger:
+                try:
+                    equity = self.risk.get_total_equity()
+                    summary = self._build_obs_summary(equity)
+                    self.obsidian_logger.log_session_end([{**summary, "is_paper": False}])
+                    self.obsidian_logger.log_daily_report(
+                        self.strategy.get_scenario_id(),
+                        summary,
+                        self._obs_session_trades,
+                        is_paper=False,
+                    )
+                    logger.info("Obsidian 세션 종료 + 일보 저장 완료")
+                except Exception as e:
+                    logger.warning(f"Obsidian 종료 기록 실패: {e}")
+
+            logger.info("시스템 종료 완료")
+        finally:
+            clear_log_mode()
 
     # ─── 메인 매매 루프 ────────────────────────────────────────────────────────
 
@@ -398,7 +542,13 @@ class Trader:
                             custom_fetcher=lambda n: self.universe_selector.select_top_n(n)
                         )
                     else:
-                        new_tickers, changed = self._ticker_manager.refresh_if_needed()
+                        new_tickers, changed = self._ticker_manager.refresh_if_needed(
+                            custom_fetcher=lambda n: self.market_data.get_top_tickers_for_strategy(
+                                self.strategy,
+                                n,
+                                blacklist=set(config.TICKER_BLACKLIST) | self._runtime_blacklist,
+                            )
+                        )
                     if changed:
                         self._update_active_tickers(new_tickers)
                 except Exception as e:
@@ -412,19 +562,11 @@ class Trader:
                     self._last_ticker_refresh = now
 
             # ── 거래소 포지션 주기 동기화 (외부 매수 / 응답 유실 포지션 복구) ────
-            # 30분마다 실제 잔고를 조회해 positions.json에 없는 코인을 자동 등록
+            # 실제 잔고를 주기적으로 조회해 외부 매수/매도까지 반영
             now_ts = time.time()
-            if now_ts - self._last_exchange_sync >= 1800:  # 30분
+            if now_ts - self._last_exchange_sync >= config.EXCHANGE_POSITION_SYNC_SEC:
                 try:
-                    first_sid = self._scenarios[0].scenario_id
-                    imported = self.state.sync_from_exchange(
-                        self.client, tickers=None, default_scenario_id=first_sid
-                    )
-                    if imported:
-                        new_t = [t for t in imported if t not in self._active_tickers]
-                        if new_t:
-                            self._active_tickers.extend(new_t)
-                            logger.info(f"[주기동기화] 신규 종목 WebSocket 추가: {new_t}")
+                    self.sync_exchange_positions_now(reason="auto")
                 except Exception as _e:
                     logger.warning(f"거래소 주기 동기화 오류 (무시): {_e}")
                 finally:
@@ -507,6 +649,7 @@ class Trader:
         with self._trade_lock:
             if self.state.has_position(ticker):
                 position = self.state.get_position(ticker)
+                self._ensure_order_state_for_position(position)
 
                 # 이 시나리오가 소유한 포지션인지 확인
                 if position.scenario_id != scenario.scenario_id:
@@ -530,6 +673,10 @@ class Trader:
             else:
                 # 3. 일일 매수 중복 체크 (스케줄 매도 전략만: 하루 1회)
                 if scenario.strategy.requires_scheduled_sell() and self._already_bought_today(scenario, ticker):
+                    return
+
+                history_ok, _ = self._has_required_history(ticker, scenario)
+                if not history_ok:
                     return
 
                 # 4. AutoTuner 필터 (활성 시)
@@ -568,6 +715,35 @@ class Trader:
                     else:
                         logger.debug(f"매수 차단: {ticker} - {reason}")
 
+    def _has_required_history(
+        self, ticker: str, scenario: RealScenario
+    ) -> tuple[bool, str]:
+        """
+        전략 평가 전에 필요한 히스토리 봉 수를 확인한다.
+        신규 상장/재상장 종목의 반복 DATA_ERROR 로그를 줄이기 위한 가드.
+        """
+        requirements = scenario.strategy.get_history_requirements()
+        if not requirements:
+            return True, ""
+
+        signature = tuple(sorted(requirements.items()))
+        cache_key = (scenario.scenario_id, ticker, signature)
+        now = time.time()
+        cached = self._history_guard_cache.get(cache_key)
+        if cached:
+            ok, expire_at, reason = cached
+            if now < expire_at:
+                return ok, reason
+
+        ok, reason = self.market_data.has_sufficient_history(ticker, requirements)
+        ttl_sec = 300.0 if ok else 1800.0
+        self._history_guard_cache[cache_key] = (ok, now + ttl_sec, reason)
+
+        if not ok:
+            logger.info(f"[HistoryGuard][{scenario.scenario_id}] {reason}")
+
+        return ok, reason
+
     # ─── 멀티시나리오 종목 주기 갱신 ────────────────────────────────────────
 
     def _refresh_scenario_tickers(self) -> None:
@@ -575,49 +751,68 @@ class Trader:
         멀티시나리오 모드 전용: 거래량 상위 종목을 시나리오별로 재선정.
 
         - 각 시나리오의 ticker_count 기준으로 top-N을 개별 조회
+        - 전략별 최소 히스토리를 만족하는 종목만 선별
+        - 이미 보유 중인 종목은 매도 전까지 유지
         - 실패 시 기존 ticker 목록 유지 (안전 폴백)
         - 종목 변경이 있으면 WebSocket 재구독
-        - 보유 포지션 종목은 _run_buy_loop()의 orphan 패스가 별도 처리
+        - 보유 포지션 종목은 scenario.tickers에 남겨 실시간 감시 유지
         """
-        logger.info("[Trader] 멀티시나리오 거래량 상위 종목 갱신 시작...")
-        all_tickers: set[str] = set()
+        with self._ticker_refresh_lock:
+            logger.info("[Trader] 멀티시나리오 거래량 상위 종목 갱신 시작...")
+            all_tickers: set[str] = set()
+            combined_blacklist = set(config.TICKER_BLACKLIST) | self._runtime_blacklist
+            max_pool = min(max((s.ticker_count for s in self._scenarios), default=10) * 5, 200)
+            base_tickers = [
+                t for t in MarketData.get_top_tickers_by_volume(max_pool)
+                if t not in combined_blacklist
+            ]
 
-        for scenario in self._scenarios:
-            n = scenario.ticker_count
-            if n <= 0:
-                all_tickers.update(scenario.tickers)
-                continue
-            try:
-                new_tickers = MarketData.get_top_tickers_by_volume(n)
-                # 블랙리스트 필터 (config 고정 + 런타임 자동 등록)
-                combined_blacklist = set(config.TICKER_BLACKLIST) | self._runtime_blacklist
-                new_tickers = [t for t in new_tickers if t not in combined_blacklist]
-                new_tickers = new_tickers[:n]
-
-                added   = set(new_tickers) - set(scenario.tickers)
-                removed = set(scenario.tickers) - set(new_tickers)
-                if added or removed:
-                    logger.info(
-                        f"[{scenario.scenario_id}] 종목 변경 | "
-                        f"추가={sorted(added)[:3]} | 제거={sorted(removed)[:3]}"
-                        + (f" 외 {max(0, len(added)-3)+max(0, len(removed)-3)}종목" if (len(added)+len(removed)) > 6 else "")
+            for scenario in self._scenarios:
+                n = scenario.ticker_count
+                if n <= 0:
+                    all_tickers.update(scenario.tickers)
+                    continue
+                try:
+                    held = [
+                        pos.ticker for pos in self.state.all_positions()
+                        if pos.scenario_id == scenario.scenario_id
+                    ]
+                    new_tickers = self.market_data.get_top_tickers_for_strategy(
+                        scenario.strategy,
+                        n,
+                        blacklist=combined_blacklist,
+                        must_keep=held,
+                        base_tickers=base_tickers,
                     )
-                else:
-                    logger.debug(f"[{scenario.scenario_id}] 종목 변동 없음 ({n}개)")
 
-                scenario.tickers = new_tickers
-                all_tickers.update(new_tickers)
-            except Exception as e:
-                logger.warning(f"[{scenario.scenario_id}] 종목 갱신 실패 → 기존 유지: {e}")
-                all_tickers.update(scenario.tickers)
+                    added = set(new_tickers) - set(scenario.tickers)
+                    removed = set(scenario.tickers) - set(new_tickers)
+                    if added or removed:
+                        logger.info(
+                            f"[{scenario.scenario_id}] 종목 변경 | "
+                            f"추가={sorted(added)[:3]} | 제거={sorted(removed)[:3]}"
+                            + (
+                                f" 외 {max(0, len(added)-3)+max(0, len(removed)-3)}종목"
+                                if (len(added) + len(removed)) > 6 else ""
+                            )
+                        )
+                    else:
+                        logger.debug(f"[{scenario.scenario_id}] 종목 변동 없음 ({n}개)")
 
-        # WebSocket 재구독 (새 종목이 추가된 경우)
-        new_active = list(all_tickers)
-        if set(new_active) != set(self._active_tickers):
-            self._update_active_tickers(new_active)
-        else:
-            self._active_tickers = new_active
-            logger.info(f"[Trader] 종목 갱신 완료 (WebSocket 변경 없음) | 전체 {len(self._active_tickers)}개")
+                    scenario.tickers = new_tickers
+                    all_tickers.update(new_tickers)
+                except Exception as e:
+                    logger.warning(f"[{scenario.scenario_id}] 종목 갱신 실패 → 기존 유지: {e}")
+                    all_tickers.update(scenario.tickers)
+
+            new_active = self._filter_active_tickers(list(all_tickers))
+            if set(new_active) != set(self._active_tickers):
+                self._update_active_tickers(new_active)
+            else:
+                self._active_tickers = new_active
+                logger.info(
+                    f"[Trader] 종목 갱신 완료 (WebSocket 변경 없음) | 전체 {len(self._active_tickers)}개"
+                )
 
     # ─── 동적 종목 변경 ──────────────────────────────────────────────────────
 
@@ -627,8 +822,16 @@ class Trader:
         종목이 바뀐 경우에만 호출됨 (refresh_if_needed가 changed=True 반환 시).
         WebSocket 재시작 시 price_cache는 공유 유지 (종목 변경 전 가격도 참조 가능).
         """
+        new_tickers = self._filter_active_tickers(new_tickers)
         old_tickers = self._active_tickers
+        if set(new_tickers) == set(old_tickers):
+            self._active_tickers = new_tickers
+            if not self._multi_scenario_mode and self._scenarios:
+                self._scenarios[0].tickers = list(new_tickers)
+            return
         self._active_tickers = new_tickers
+        if not self._multi_scenario_mode and self._scenarios:
+            self._scenarios[0].tickers = list(new_tickers)
 
         logger.info(
             f"[Trader] 종목 변경 | {len(old_tickers)}→{len(new_tickers)}개 | "
@@ -637,13 +840,17 @@ class Trader:
 
         # WebSocket 재시작: 기존 구독 종료 → 새 종목으로 재구독
         self.ws.stop()
-        self.ws = WebSocketManager(self._active_tickers, self.price_cache)
+        self.ws = WebSocketManager(self._active_tickers, self.price_cache, log_mode="real")
         self.ws.start()
 
         # 호가 WebSocket도 재시작
         if self._ob_manager:
             self._ob_manager.stop()
-            self._ob_manager = OrderbookManager(self._active_tickers, self.orderbook_cache)
+            self._ob_manager = OrderbookManager(
+                self._active_tickers,
+                self.orderbook_cache,
+                log_mode="real",
+            )
             self._ob_manager.start()
 
         # WebSocket 안정화 대기 (최대 2초)
@@ -700,13 +907,33 @@ class Trader:
         - stop_loss_price→ new_buy_price × (1 - STOP_LOSS_PCT)
         - krw_spent      → 그대로 유지 (원래 투자금 추적)
         """
-        new_stop = price * (1 - config.STOP_LOSS_PCT)
-        self.state.update_position_entry(position.ticker, price, new_stop)
+        prev_buy_price = float(position.buy_price)
+        locked_floor = max(
+            float(getattr(position, "locked_profit_price", 0.0) or 0.0),
+            prev_buy_price,
+        )
+        new_stop = max(price * (1 - config.STOP_LOSS_PCT), locked_floor)
+        self.state.update_position_entry(
+            position.ticker,
+            price,
+            new_stop,
+            take_profit_price=getattr(position, "take_profit_price", 0.0),
+            take_profit_label=getattr(position, "take_profit_label", ""),
+            locked_profit_price=locked_floor,
+            entry_metadata=getattr(position, "entry_metadata", {}),
+        )
+        self.order_sm.sync_position(
+            ticker=position.ticker,
+            entry_price=price,
+            sl_price=new_stop,
+            filled_qty=position.volume,
+            order_uuid=position.order_uuid,
+        )
 
         logger.info(
             f"[Re-entry] {position.ticker} | "
-            f"기존 매수가={position.buy_price:,.0f} → 신규={price:,.0f} | "
-            f"손절가={new_stop:,.0f} | 원인={original_reason}"
+            f"기존 매수가={prev_buy_price:,.0f} → 신규={price:,.0f} | "
+            f"손절가={new_stop:,.0f} | 이익잠금={locked_floor:,.0f} | 원인={original_reason}"
         )
 
         # 거래 로그: REENTRY 이벤트 기록
@@ -805,10 +1032,15 @@ class Trader:
             ))
             return
 
-        if order.volume <= 0 or order.state == "cancel":
+        if order.volume <= 0:
             logger.warning(f"매수 미체결/취소: {ticker} vol={order.volume} state={order.state}")
             self.order_sm.cancel_entry(ticker, reason="미체결/취소")
             return
+        if order.state == "cancel":
+            logger.warning(
+                f"매수 부분체결 후 잔량 취소로 처리됨: {ticker} "
+                f"vol={order.volume} avg={order.avg_price:,.0f}"
+            )
 
         # 손절가 결정 우선순위:
         # 1) PositionSizer가 계산한 SL (ATR 기반)
@@ -819,6 +1051,12 @@ class Trader:
         else:
             sl_pct = signal.metadata.get("stop_loss_pct", config.STOP_LOSS_PCT) if signal.metadata else config.STOP_LOSS_PCT
             stop_loss_price = order.avg_price * (1 - sl_pct)
+
+        target_price = 0.0
+        target_label = ""
+        if signal.metadata:
+            target_price = float(signal.metadata.get("tp_price", 0.0) or 0.0)
+            target_label = str(signal.metadata.get("tp_label", "") or "")
 
         # 상태머신: 매수 체결 확인
         self.order_sm.confirm_entry(ticker, order.volume, order.avg_price)
@@ -833,6 +1071,10 @@ class Trader:
             stop_loss_price=stop_loss_price,
             strategy_id=scenario.strategy_id,
             scenario_id=scenario.scenario_id,
+            take_profit_price=target_price,
+            take_profit_label=target_label,
+            locked_profit_price=order.avg_price,
+            entry_metadata=dict(signal.metadata or {}),
         )
 
         self.state.add_position(position)
@@ -890,7 +1132,10 @@ class Trader:
         logger.info(f"매도 시도 | {position.ticker} | price={price:,.0f} | reason={reason}")
 
         # 상태머신: EXIT_PENDING 전이
-        self.order_sm.request_exit(position.ticker, "", reason)
+        self._ensure_order_state_for_position(position)
+        if not self.order_sm.request_exit(position.ticker, "", reason):
+            self._ensure_order_state_for_position(position)
+            self.order_sm.request_exit(position.ticker, "", reason)
 
         order: OrderResult | None = None
         error_msg: str | None = None
@@ -898,7 +1143,12 @@ class Trader:
         for attempt in range(3):
             try:
                 order = self.client.sell_market_order(position.ticker, position.volume)
-                if order.volume > 0 and order.state != "cancel":
+                if order.volume > 0:
+                    if order.state == "cancel":
+                        logger.warning(
+                            f"매도 부분체결 후 잔량 취소로 처리됨: {position.ticker} "
+                            f"vol={order.volume} avg={order.avg_price:,.0f}"
+                        )
                     break
                 logger.warning(f"매도 미체결, 재시도 ({attempt+1}/3): {position.ticker}")
             except OrderFailedError as e:

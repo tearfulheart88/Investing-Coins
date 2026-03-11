@@ -63,6 +63,7 @@ ORDER_SM_EXIT_TIMEOUT_SEC: float = 10.0    # 매도 체결 대기 타임아웃 (
 
 # ─── 루프 & 레이트 리밋 ──────────────────────────────────────────────────────
 PRICE_CHECK_INTERVAL_SEC: int = 10      # 매수 신호 확인 주기 (초) — 5→10 (API/CPU 부하 절감)
+EXCHANGE_POSITION_SYNC_SEC: int = 60    # 거래소 잔고/포지션 자동 동기화 주기 (초)
 ORDER_RATE_LIMIT_PER_SEC: int = 5       # 주문 API 보수적 제한 (업비트: 8/s)
 DATA_RATE_LIMIT_PER_SEC: int = 8        # 시세 API 보수적 제한 (업비트: 10/s)
 WEBSOCKET_STALE_SEC: float = 10.0       # 이 시간 초과 시 REST 폴백
@@ -73,6 +74,8 @@ LOGS_DIR: str = os.path.join(BASE_DIR, "logs")
 TRADES_JSON_PATH: str = os.path.join(LOGS_DIR, "trades", "trades.json")
 POSITIONS_PATH: str = os.path.join(LOGS_DIR, "state", "positions.json")
 SYSTEM_LOG_DIR: str = os.path.join(LOGS_DIR, "system")
+REAL_LOG_DIR: str = os.path.join(LOGS_DIR, "real")
+PAPER_LOG_DIR: str = os.path.join(LOGS_DIR, "paper")
 SESSIONS_DIR: str = os.path.join(LOGS_DIR, "sessions")
 
 # ─── 가상거래 ─────────────────────────────────────────────────────────────────

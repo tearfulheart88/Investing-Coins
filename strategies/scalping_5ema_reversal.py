@@ -68,6 +68,12 @@ class FiveEMAReversalStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return False
 
+    def get_history_requirements(self) -> dict[str, int]:
+        return {
+            _INTERVAL: 60,
+            _HTF_INTERVAL: _HTF_EMA,
+        }
+
     # ─── 매수 신호 ────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
@@ -153,6 +159,7 @@ class FiveEMAReversalStrategy(BaseStrategy):
         meta.update({
             "sl_pct": round(sl_pct, 6), "tp_price": round(tp_price, 0),
             "stop_loss_pct": round(sl_pct, 6),
+            "tp_label": f"RR 1:{_RR:.1f}",
         })
 
         logger.info(

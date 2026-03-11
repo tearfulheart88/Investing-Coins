@@ -76,6 +76,12 @@ class RSIStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return False
 
+    def get_history_requirements(self) -> dict[str, int]:
+        return {
+            _INTERVAL: 60,
+            _HTF_INTERVAL: 195,
+        }
+
     def on_position_closed(self, ticker: str, reason: str = "") -> None:
         self._peaks.pop(ticker, None)
         cd_end = time.time() + _COOLDOWN_HOURS * 3600
@@ -111,6 +117,7 @@ class RSIStrategy(BaseStrategy):
             "rsi_1h":      round(rsi, 2),
             "adx":         round(adx, 1),
             "ema200_4h":   round(ema200_4h, 0),
+            "tp_label":    "RSI 회복",
         }
 
         if current_price < ema200_4h:

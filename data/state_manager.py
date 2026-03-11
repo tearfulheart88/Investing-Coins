@@ -2,7 +2,7 @@ import os
 import json
 import threading
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -24,6 +24,10 @@ class Position:
     side: str = "LONG"          # "LONG" | "SHORT" (현물=LONG)
     leverage: int = 1           # 현물=1, 선물=2~125
     liquidation_price: float = 0.0  # 0=현물(청산 없음)
+    take_profit_price: float = 0.0
+    take_profit_label: str = ""
+    locked_profit_price: float = 0.0
+    entry_metadata: dict = field(default_factory=dict)
 
     def unrealized_pnl_pct(self, current_price: float) -> float:
         """미실현 손익률"""
@@ -79,6 +83,12 @@ class StateManager:
                     pos_dict.setdefault("side", "LONG")
                     pos_dict.setdefault("leverage", 1)
                     pos_dict.setdefault("liquidation_price", 0.0)
+                    pos_dict.setdefault("take_profit_price", 0.0)
+                    pos_dict.setdefault("take_profit_label", "")
+                    pos_dict.setdefault("locked_profit_price", 0.0)
+                    pos_dict.setdefault("entry_metadata", {})
+                    if pos_dict["entry_metadata"] is None:
+                        pos_dict["entry_metadata"] = {}
                     self._positions[ticker] = Position(**pos_dict)
             logger.info(f"포지션 로드 완료: {list(self._positions.keys())}, peak_equity={self._peak_equity:,.0f}")
 
@@ -154,6 +164,11 @@ class StateManager:
         ticker: str,
         new_buy_price: float,
         new_stop_loss: float,
+        *,
+        take_profit_price: float | None = None,
+        take_profit_label: str | None = None,
+        locked_profit_price: float | None = None,
+        entry_metadata: dict | None = None,
     ) -> bool:
         """
         재진입(Re-entry): 포지션의 기준 매수가와 손절가를 갱신합니다.
@@ -170,6 +185,14 @@ class StateManager:
                 return False
             pos.buy_price       = new_buy_price
             pos.stop_loss_price = new_stop_loss
+            if take_profit_price is not None:
+                pos.take_profit_price = take_profit_price
+            if take_profit_label is not None:
+                pos.take_profit_label = take_profit_label
+            if locked_profit_price is not None:
+                pos.locked_profit_price = locked_profit_price
+            if entry_metadata is not None:
+                pos.entry_metadata = dict(entry_metadata)
         self.save()
         logger.info(
             f"[StateManager] 재진입 갱신 | {ticker} | "
@@ -293,6 +316,8 @@ class StateManager:
                 stop_loss_price = stop_loss_price,
                 strategy_id     = "exchange_sync",
                 scenario_id     = default_scenario_id,
+                locked_profit_price=0.0,
+                entry_metadata  = {},
             )
             self.add_position(pos)
             added.append(ticker)
@@ -309,3 +334,133 @@ class StateManager:
             logger.info("거래소 동기화: 추가할 미추적 포지션 없음")
 
         return added
+
+    def sync_with_exchange(
+        self,
+        client,
+        tickers: list[str] | None = None,
+        default_scenario_id: str = "exchange_sync",
+    ) -> dict[str, list[str]]:
+        """
+        거래소 실제 잔고와 내부 포지션을 완전 동기화한다.
+
+        - 신규 보유 코인 추가
+        - 외부 매도로 사라진 포지션 제거
+        - 외부 추가매수/부분매도에 따른 수량/평단 갱신
+        """
+        import config as _cfg
+
+        try:
+            balances = client.get_balances()
+        except Exception as e:
+            logger.warning(f"거래소 포지션 전체 동기화 실패 (잔고 조회 오류): {e}")
+            return {"added": [], "removed": [], "updated": []}
+
+        bal_map: dict[str, dict] = {}
+        for b in balances:
+            currency = b.get("currency", "")
+            available = float(b.get("balance", 0) or 0)
+            locked = float(b.get("locked", 0) or 0)
+            total_amt = available + locked
+            if currency != "KRW" and total_amt > 0:
+                bal_map[currency] = {
+                    "amount": total_amt,
+                    "avg_buy_price": float(b.get("avg_buy_price", 0) or 0),
+                }
+
+        blacklist: set[str] = set(getattr(_cfg, "TICKER_BLACKLIST", []))
+        now_str = datetime.now(KST).isoformat()
+        added: list[str] = []
+        removed: list[str] = []
+        updated: list[str] = []
+
+        with self._lock:
+            current_tickers = set(self._positions.keys())
+            if tickers is None:
+                candidate_tickers = {
+                    f"KRW-{cur}" for cur in bal_map.keys()
+                    if f"KRW-{cur}" not in blacklist
+                } | {t for t in current_tickers if t not in blacklist}
+            else:
+                candidate_tickers = {t for t in tickers if t not in blacklist}
+                candidate_tickers |= {t for t in current_tickers if t in candidate_tickers}
+
+            for ticker in sorted(candidate_tickers):
+                currency = ticker.replace("KRW-", "")
+                data = bal_map.get(currency)
+                amount = float(data["amount"]) if data else 0.0
+                avg_price = float(data["avg_buy_price"]) if data else 0.0
+
+                pos = self._positions.get(ticker)
+                if amount <= 0:
+                    if pos is not None:
+                        self._positions.pop(ticker, None)
+                        removed.append(ticker)
+                    continue
+
+                if pos is None:
+                    if avg_price <= 0:
+                        logger.warning(f"거래소 동기화 건너뜀 (평단 0): {ticker}")
+                        continue
+                    stop_loss_price = avg_price * (1 - _cfg.STOP_LOSS_PCT)
+                    self._positions[ticker] = Position(
+                        ticker=ticker,
+                        volume=amount,
+                        buy_price=avg_price,
+                        buy_time=now_str,
+                        krw_spent=int(avg_price * amount),
+                        order_uuid="EXCHANGE_SYNC",
+                        stop_loss_price=stop_loss_price,
+                        strategy_id="exchange_sync",
+                        scenario_id=default_scenario_id,
+                        locked_profit_price=0.0,
+                        entry_metadata={},
+                    )
+                    added.append(ticker)
+                    continue
+
+                changed = False
+                is_exchange_managed = (
+                    pos.order_uuid == "EXCHANGE_SYNC"
+                    or pos.strategy_id == "exchange_sync"
+                )
+
+                if abs(pos.volume - amount) > 1e-12:
+                    pos.volume = amount
+                    changed = True
+
+                if is_exchange_managed and avg_price > 0 and abs(pos.buy_price - avg_price) > 1e-9:
+                    pos.buy_price = avg_price
+                    changed = True
+
+                if is_exchange_managed:
+                    new_krw_spent = int(avg_price * amount) if avg_price > 0 else int(pos.buy_price * pos.volume)
+                    if pos.krw_spent != new_krw_spent:
+                        pos.krw_spent = new_krw_spent
+                        changed = True
+
+                if is_exchange_managed and avg_price > 0:
+                    new_stop = max(
+                        avg_price * (1 - _cfg.STOP_LOSS_PCT),
+                        float(pos.locked_profit_price or 0.0),
+                    )
+                    if abs(pos.stop_loss_price - new_stop) > 1e-9:
+                        pos.stop_loss_price = new_stop
+                        changed = True
+
+                if changed:
+                    updated.append(ticker)
+
+        if added or removed or updated:
+            self.save()
+            logger.info(
+                f"거래소 전체 동기화 완료 | 추가={added} | 제거={removed} | 갱신={updated}"
+            )
+        else:
+            logger.info("거래소 전체 동기화: 변경 없음")
+
+        return {
+            "added": added,
+            "removed": removed,
+            "updated": updated,
+        }

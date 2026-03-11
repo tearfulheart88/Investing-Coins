@@ -56,6 +56,15 @@ class MACDRSITrendStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return False
 
+    def get_history_requirements(self) -> dict[str, int]:
+        return {
+            _INTERVAL: max(
+                _MACD_SLOW + _MACD_SIGNAL + 3,
+                _RSI_PERIOD * 4 + 2,
+                _VOL_SMA_PERIOD + 5,
+            ),
+        }
+
     # ─── 매수 신호 ────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
@@ -83,6 +92,7 @@ class MACDRSITrendStrategy(BaseStrategy):
             "rsi_1h":     round(rsi_now,   1),
             "rsi_prev":   round(rsi_prev,  1),
             "vol_ratio":  round(vol_ratio, 2),
+            "tp_label":   "MACD/RSI 약화",
         }
 
         # ── 조건 1: MACD 골든크로스 ──────────────────────────────────────────

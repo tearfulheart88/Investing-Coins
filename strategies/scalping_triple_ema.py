@@ -85,6 +85,12 @@ class TripleEMAStrategy(BaseStrategy):
     def requires_scheduled_sell(self) -> bool:
         return False
 
+    def get_history_requirements(self) -> dict[str, int]:
+        return {
+            _INTERVAL: max(50, _ATR_PERIOD),
+            _HTF_INTERVAL: _HTF_EMA,
+        }
+
     # ─── 매수 신호 ────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
@@ -192,6 +198,8 @@ class TripleEMAStrategy(BaseStrategy):
         except Exception:
             atr_sl_pct = _SL_PCT_FALLBACK
         meta["stop_loss_pct"] = round(atr_sl_pct, 6)
+        meta["tp_price"] = round(current_price * (1 + _TRAIL_TRIGGER_PCT), 0)
+        meta["tp_label"] = "트레일활성"
 
         # [개선] 쿨타임 시작: 매수 신호 발생 시각 기록 (단조 시간 사용)
         # 이후 _COOLTIME_SEC(15분)간 동일 종목 재진입 차단
