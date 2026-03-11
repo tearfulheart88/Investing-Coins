@@ -191,6 +191,9 @@ class Trader:
         self._runtime_blacklist: set[str] = set()      # 세션 종료까지 스캔 제외
         self._data_error_count: dict[str, int] = {}    # ticker → 연속 DATA_ERROR 횟수
 
+        # 거래소 주기 동기화 타임스탬프 (외부 매수 / 응답 유실 포지션 복구)
+        self._last_exchange_sync: float = 0.0
+
         # 정상 종료 플래그
         self._running = False
 
@@ -407,6 +410,25 @@ class Trader:
                 if now - self._last_ticker_refresh >= refresh_sec:
                     self._refresh_scenario_tickers()
                     self._last_ticker_refresh = now
+
+            # ── 거래소 포지션 주기 동기화 (외부 매수 / 응답 유실 포지션 복구) ────
+            # 30분마다 실제 잔고를 조회해 positions.json에 없는 코인을 자동 등록
+            now_ts = time.time()
+            if now_ts - self._last_exchange_sync >= 1800:  # 30분
+                try:
+                    first_sid = self._scenarios[0].scenario_id
+                    imported = self.state.sync_from_exchange(
+                        self.client, tickers=None, default_scenario_id=first_sid
+                    )
+                    if imported:
+                        new_t = [t for t in imported if t not in self._active_tickers]
+                        if new_t:
+                            self._active_tickers.extend(new_t)
+                            logger.info(f"[주기동기화] 신규 종목 WebSocket 추가: {new_t}")
+                except Exception as _e:
+                    logger.warning(f"거래소 주기 동기화 오류 (무시): {_e}")
+                finally:
+                    self._last_exchange_sync = now_ts
 
             # ── 상태머신 타임아웃 처리 ───────────────────────────────────────
             self._handle_order_timeouts()
