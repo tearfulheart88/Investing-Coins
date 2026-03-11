@@ -60,12 +60,24 @@ class MarketData:
         return df
 
     def _fetch_ohlcv(self, ticker: str, count: int) -> pd.DataFrame:
-        """OHLCV API 호출 (재시도 포함)"""
+        """OHLCV API 호출 (재시도 포함) — _api_lock + None 재시도 sleep 적용"""
         for attempt in range(3):
             try:
-                df = pyupbit.get_ohlcv(ticker, interval="day", count=count)
+                # rate limit: 분봉과 동일한 직렬화 + 최소 간격 보장
+                with self._api_lock:
+                    elapsed = time.time() - self._last_api_call
+                    if elapsed < self._MIN_API_INTERVAL:
+                        time.sleep(self._MIN_API_INTERVAL - elapsed)
+                    df = pyupbit.get_ohlcv(ticker, interval="day", count=count)
+                    self._last_api_call = time.time()
+
                 if df is not None and not df.empty:
                     return df
+
+                # API가 None/empty 반환 → 잠시 대기 후 재시도
+                if attempt < 2:
+                    time.sleep(1.0 + attempt)
+
             except Exception as e:
                 if attempt < 2:
                     time.sleep(1.5 ** attempt)
