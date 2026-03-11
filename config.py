@@ -182,8 +182,8 @@ STRATEGY_PARAMS: dict = {
         "macd_signal":  70,              # MACD 시그널 기간 (원본 명세: 70)
     },
     "pump_catcher": {
-        "vol_mult":             15.0,    # 거래량 폭발 배수 (SMA20 × N배 이상)
-        "spike_pct":             3.0,    # 1분봉 시가 대비 최소 급등률 (%)
+        "vol_mult":              8.0,    # 거래량 폭발 배수 (SMA20 × N배 이상) — v2: 15→8 (0거래 해소)
+        "spike_pct":             1.5,    # 1분봉 시가 대비 최소 급등률 (%) — v2: 3.0→1.5
         "max_gain_from_open":   15.0,    # 일봉 시가 대비 최대 허용 상승률 (%)
         "min_body_ratio":        0.5,    # 양봉 몸통 비율 하한 (설거지 위꼬리 방지)
         "rsi_max":              85.0,    # RSI 최대 허용값 (과열 방지)

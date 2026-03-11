@@ -63,6 +63,12 @@ _RSI_PERIOD     = 14
 _RSI_MIN        = 50.0   # 4h + 30m 공통 RSI 최소 기준
 _MA_PERIOD      = 20     # 일봉 이동평균 기간
 
+# ── HA 하단꼬리 허용 비율 ────────────────────────────────────────────────────
+# 4h HA 캔들의 하단꼬리가 HA_open 대비 이 비율 이하여야 "강한 양봉"으로 인정
+# 0.0002(0.02%): 원래값 — 사실상 꼬리 없는 봉만 허용 (극히 드묾 → 0거래)
+# 0.005 (0.5%): 소폭 꼬리 허용 — 현실적인 기준
+_HA_WICK_PCT    = 0.005  # v2: 0.0002 → 0.005 (4h HA 진입 기회 확대)
+
 # ── [개선] 거래량 필터 파라미터 ─────────────────────────────────────────────
 # 가짜 돌파(Fakeout) 방지: 돌파 시점의 30m 거래량이 충분해야만 진짜 돌파로 인정
 _VOL_MULT_30M   = 1.5    # 진짜 돌파 인정 거래량 배수 (직전 N봉 평균 대비)
@@ -116,7 +122,7 @@ class SMRHStopStrategy(BaseStrategy):
         ha_low_4h  = float(ha_4h_last["low"])
         ha_4h_no_lower_wick = (
             ha_4h_bullish and
-            (abs(ha_open_4h - ha_low_4h) / ha_open_4h < 0.0002 if ha_open_4h > 0 else False)
+            (abs(ha_open_4h - ha_low_4h) / ha_open_4h < _HA_WICK_PCT if ha_open_4h > 0 else False)
         )
 
         meta = {
