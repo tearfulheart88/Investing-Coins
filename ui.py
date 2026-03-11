@@ -2237,19 +2237,100 @@ class TradingApp(tk.Tk):
     # ─── 종목 동적 로드 ──────────────────────────────────────────────────────
 
     def _refresh_tickers(self) -> None:
-        """거래량 상위 100개 종목을 백그라운드에서 조회해 체크박스 목록 갱신"""
+        """
+        거래량 상위 종목 조회 및 목록 갱신.
+        - 실제전략이 설정된 경우: 전략별 top-N 미리보기 표시 (읽기전용)
+        - 그 외: 거래량 상위 100개 체크박스 표시 (가상거래용)
+        """
         self._ticker_status.config(text="로딩 중...", fg=C.YELLOW)
-        threading.Thread(target=self._fetch_tickers_bg, daemon=True).start()
+        scenario_info: list[tuple[str, int]] = []
+        if hasattr(self, "_real_scenario_rows"):
+            for row in self._real_scenario_rows:
+                name = row.strategy_var.get()
+                try:
+                    n = int(row.ticker_count_var.get())
+                except (ValueError, AttributeError):
+                    n = 10
+                if name and n > 0:
+                    scenario_info.append((name, n))
+        threading.Thread(
+            target=self._fetch_tickers_bg,
+            args=(scenario_info,),
+            daemon=True,
+        ).start()
 
-    def _fetch_tickers_bg(self) -> None:
+    def _fetch_tickers_bg(self, scenario_info: list[tuple[str, int]] = ()) -> None:
         try:
             from data.market_data import MarketData
-            tickers = MarketData.get_top_tickers_by_volume(100)
-            self.after(0, lambda: self._populate_tickers(tickers))
+            if scenario_info:
+                max_n = max(n for _, n in scenario_info)
+                top_tickers = MarketData.get_top_tickers_by_volume(max_n)
+                ticker_strategy_map: dict[str, set[str]] = {}
+                for name, n in scenario_info:
+                    for t in top_tickers[:n]:
+                        ticker_strategy_map.setdefault(t, set()).add(name)
+                self.after(0, lambda: self._populate_tickers_preview(
+                    top_tickers, ticker_strategy_map, scenario_info
+                ))
+            else:
+                tickers = MarketData.get_top_tickers_by_volume(100)
+                self.after(0, lambda: self._populate_tickers(tickers))
         except Exception as e:
             self.after(0, lambda err=e: self._ticker_status.config(
                 text=f"로드 실패: {err}", fg=C.RED
             ))
+
+    def _populate_tickers_preview(
+        self,
+        tickers: list[str],
+        ticker_strategy_map: dict[str, set[str]],
+        scenario_info: list[tuple[str, int]],
+    ) -> None:
+        """실제전략 종목 미리보기: 종목 + 전략별 체크마크 (읽기전용)"""
+        for w in self._ticker_inner.winfo_children():
+            w.destroy()
+        self._ticker_vars.clear()
+
+        strategy_names = [name for name, _ in scenario_info]
+        strategy_ns    = {name: n for name, n in scenario_info}
+        col_widths = [4, 8] + [10] * len(strategy_names)
+        hdr_cols = ["순위", "종목"] + [s[:10] for s in strategy_names]
+
+        for ci, (hdr, w) in enumerate(zip(hdr_cols, col_widths)):
+            tk.Label(
+                self._ticker_inner, text=hdr, font=("Arial", 7, "bold"),
+                fg=C.ACCENT, bg=C.BG3, width=w, anchor="center",
+            ).grid(row=0, column=ci, sticky="ew", padx=1, pady=(0, 2))
+
+        for ri, ticker in enumerate(tickers, start=1):
+            sym = ticker.replace("KRW-", "")
+            strategies_covering = ticker_strategy_map.get(ticker, set())
+
+            tk.Label(
+                self._ticker_inner, text=str(ri), font=("Arial", 8),
+                fg=C.SUB, bg=C.BG2, width=4, anchor="center",
+            ).grid(row=ri, column=0, sticky="ew", padx=1, pady=1)
+
+            tk.Label(
+                self._ticker_inner, text=sym, font=("Arial", 8, "bold"),
+                fg=C.FG, bg=C.BG2, width=8, anchor="w",
+            ).grid(row=ri, column=1, sticky="ew", padx=1, pady=1)
+
+            for ci, name in enumerate(strategy_names, start=2):
+                in_s = name in strategies_covering
+                tk.Label(
+                    self._ticker_inner,
+                    text="✓" if in_s else "·",
+                    font=("Arial", 9),
+                    fg=C.GREEN if in_s else C.SUB,
+                    bg=C.BG2, width=col_widths[ci], anchor="center",
+                ).grid(row=ri, column=ci, sticky="ew", padx=1, pady=1)
+
+        desc_parts = [f"{name}:top{strategy_ns[name]}" for name in strategy_names]
+        self._ticker_status.config(
+            text=f"실제전략 미리보기 ({', '.join(desc_parts)})", fg=C.GREEN
+        )
+        self._ticker_sel_label.config(text=f"총 {len(tickers)}개")
 
     def _populate_tickers(self, tickers: list[str]) -> None:
         prev_selected = {t for t, v in self._ticker_vars.items() if v.get()}
@@ -2275,7 +2356,6 @@ class TradingApp(tk.Tk):
                 activeforeground=C.FG,
             )
             cb.grid(row=i // cols, column=i % cols, sticky="w", padx=4, pady=1)
-            # 체크박스 위에서도 마우스휠 스크롤 전달
             if hasattr(self, "_ticker_scroll_fn"):
                 cb.bind("<MouseWheel>", self._ticker_scroll_fn)
 
