@@ -174,7 +174,7 @@ class GeminiStrategyAnalyzer:
             try:
                 from logging_.session_log_writer import load_latest_session_log
                 session_trades = load_latest_session_log(scenario_id, max_trades)
-                if session_trades:
+                if session_trades is not None:
                     logger.info(
                         f"[GeminiAnalyzer] 분석 로그 폴더에서 로드 | "
                         f"scenario={scenario_id} | {len(session_trades)}건"
@@ -228,8 +228,16 @@ class GeminiStrategyAnalyzer:
 
     def _compute_stats(self, trades: list[dict]) -> dict:
         """거래 통계 계산."""
-        sells = [t for t in trades if t.get("action") == "SELL"]
-        buys  = [t for t in trades if t.get("action") == "BUY"]
+        perf_trades = [
+            t for t in trades
+            if t.get("action") in {"BUY", "SELL"}
+        ]
+        strategy_trades = [
+            t for t in perf_trades
+            if t.get("strategy_id") not in {"exchange_sync", "unknown"}
+        ]
+        sells = [t for t in strategy_trades if t.get("action") == "SELL"]
+        buys  = [t for t in strategy_trades if t.get("action") == "BUY"]
 
         pnl_list = [
             t["pnl_pct"] for t in sells
@@ -244,7 +252,7 @@ class GeminiStrategyAnalyzer:
             reasons[r] = reasons.get(r, 0) + 1
 
         return {
-            "total":       len(trades),
+            "total":       len(strategy_trades),
             "buy_count":   len(buys),
             "sell_count":  len(sells),
             "win_rate":    round(len(wins) / len(pnl_list) * 100, 1) if pnl_list else 0.0,
@@ -255,6 +263,8 @@ class GeminiStrategyAnalyzer:
                 t.get("pnl_krw", 0) or 0 for t in sells
             ), 0),
             "exit_reasons": reasons,
+            "reentry_count": sum(1 for t in trades if t.get("action") == "REENTRY"),
+            "excluded_external_count": len(perf_trades) - len(strategy_trades),
         }
 
     # ─── Gemini 프롬프트 ──────────────────────────────────────────────────────

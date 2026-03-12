@@ -43,7 +43,8 @@ class RiskManager:
         if triggered:
             loss_pct = abs(position.unrealized_pnl_pct(current_price)) * 100
             logger.warning(
-                f"손절 트리거 | {position.ticker} | side={position.side} | "
+                f"엔진 손절 트리거 | {position.ticker} | side={position.side} | "
+                f"기준가={position.stop_loss_price:,.0f} "
                 f"매수가={position.buy_price:,.0f} "
                 f"현재가={current_price:,.0f} "
                 f"손실={loss_pct:.2f}%"

@@ -152,7 +152,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
         """
         포지션 종료 시 호출. 스케줄 매도(09:00), 손절, 수동 청산 등
         어떤 경로로든 포지션이 종료되면 내부 추적 상태를 정리한다.
-        v7: 손절(STOP_LOSS/TIME_CUT) 시 쿨다운 등록.
+        v7: 손절(ENGINE_STOP/HARD_SL/TIME_CUT) 시 쿨다운 등록.
         """
         self._peaks.pop(ticker, None)
         self._time_cut_extended.discard(ticker)
@@ -160,7 +160,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
         self._ema200_cache.pop(ticker, None)
 
         # v7: 손절 or 타임컷 청산 시 쿨다운 등록
-        if reason and ("STOP_LOSS" in reason or "TIME_CUT" in reason):
+        if reason and any(tag in reason for tag in ("STOP_LOSS", "ENGINE_STOP", "HARD_SL", "TIME_CUT")):
             cd_end = time.time() + _COOLDOWN_HOURS * 3600
             self._cooldowns[ticker] = cd_end
             logger.info(

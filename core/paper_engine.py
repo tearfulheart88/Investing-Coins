@@ -173,6 +173,7 @@ class PaperEngine:
                         trades=_trade_dicts,
                         summary=_summary,
                         is_paper=True,
+                        diagnostics=self._build_analysis_diagnostics(_scen),
                     )
             except Exception as _e:
                 logger.warning(f"Gemini 분석 로그 저장 실패 (paper): {_e}")
@@ -190,6 +191,35 @@ class PaperEngine:
     def get_all_summaries(self) -> list[dict]:
         prices = self._price_cache.all_prices()
         return [s.account.get_summary(prices) for s in self._scenarios]
+
+    def _build_analysis_diagnostics(self, scenario: PaperScenario) -> dict:
+        """가상거래 세션 종료 시 추적용 부가 메타데이터를 만든다."""
+        action_counts: dict[str, int] = {}
+        for trade in scenario.account.trade_history:
+            action_counts[trade.action] = action_counts.get(trade.action, 0) + 1
+
+        open_positions = []
+        for pos in scenario.account.all_positions():
+            open_positions.append({
+                "ticker": pos.ticker,
+                "buy_price": pos.buy_price,
+                "stop_loss_price": pos.stop_loss_price,
+                "buy_time": pos.buy_time.isoformat() if hasattr(pos.buy_time, "isoformat") else str(pos.buy_time),
+                "current_price": self._price_cache.get(pos.ticker),
+            })
+
+        return {
+            "mode": "paper",
+            "account_id": scenario.account.account_id,
+            "scenario_id": scenario.account.scenario_id,
+            "strategy_id": scenario.strategy.get_strategy_id(),
+            "configured_ticker_count": scenario.ticker_count,
+            "active_ticker_count": len(scenario.tickers),
+            "active_tickers": list(scenario.tickers),
+            "trade_action_counts": action_counts,
+            "open_position_count": len(open_positions),
+            "open_positions": open_positions,
+        }
 
     def get_scenario(self, account_id: str) -> PaperScenario | None:
         return next((s for s in self._scenarios if s.account.account_id == account_id), None)
@@ -361,12 +391,12 @@ class PaperEngine:
         if account.has_position(ticker):
             pos = account.get_position(ticker)
 
-            # 손절 체크
+            # 엔진 공통 손절 체크
             if account.check_stop_loss(ticker, price):
                 indicators = self._get_indicators(ticker, price)
-                trade = account.execute_sell(ticker, price, "손절매", indicators)
+                trade = account.execute_sell(ticker, price, "ENGINE_STOP", indicators)
                 if trade:
-                    strategy.on_position_closed(ticker, reason="STOP_LOSS")
+                    strategy.on_position_closed(ticker, reason="ENGINE_STOP")
                     logger.info(
                         f"[{account.account_id}] 손절 | {ticker} | {price:,.0f}원 | "
                         f"PnL: {trade.pnl:+,.0f}원 ({trade.pnl_pct:+.2f}%)"

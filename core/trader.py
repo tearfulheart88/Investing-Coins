@@ -496,14 +496,20 @@ class Trader:
             # ── Gemini 분석용 세션 로그 저장 ──────────────────────────────────────
             try:
                 from logging_.session_log_writer import paper_trade_to_dict, save_session_log
-                trade_dicts = [paper_trade_to_dict(t) for t in self._obs_session_trades]
                 equity_now = self.risk.get_total_equity()
-                save_session_log(
-                    scenario_id=self.strategy.get_scenario_id(),
-                    trades=trade_dicts,
-                    summary=self._build_obs_summary(equity_now),
-                    is_paper=False,
-                )
+                trade_dicts = [paper_trade_to_dict(t) for t in self._obs_session_trades]
+                for scenario in self._scenarios:
+                    scenario_trade_dicts = [
+                        t for t in trade_dicts
+                        if t.get("scenario_id") == scenario.scenario_id
+                    ]
+                    save_session_log(
+                        scenario_id=scenario.scenario_id,
+                        trades=scenario_trade_dicts,
+                        summary=self._build_analysis_summary(scenario.scenario_id, equity_now),
+                        is_paper=False,
+                        diagnostics=self._build_analysis_diagnostics(scenario),
+                    )
             except Exception as _e:
                 logger.warning(f"Gemini 분석 로그 저장 실패: {_e}")
 
@@ -665,9 +671,9 @@ class Trader:
                     self._execute_sell(position, price, reason=sell_signal.reason)
                     return
 
-                # 2. 손절
+                # 2. 엔진 공통 손절
                 if self.risk.check_stop_loss(position, price):
-                    self._execute_sell(position, price, reason="STOP_LOSS")
+                    self._execute_sell(position, price, reason="ENGINE_STOP")
                     return
 
             else:
@@ -885,12 +891,14 @@ class Trader:
         조건:
           1. 현재 시나리오가 REENTRY_ENABLED_SCENARIOS에 포함될 것
           2. 매도 신호가 수익 구간에서 발생했을 것 (current_price > buy_price)
-          3. 손절(STOP_LOSS)은 재진입 제외
+          3. 엔진/전략 손절(STOP_LOSS/ENGINE_STOP/HARD_SL)은 재진입 제외
         """
         scen_id = scenario.scenario_id if scenario else config.SELECTED_SCENARIO
         if scen_id not in config.REENTRY_ENABLED_SCENARIOS:
             return False
-        if "STOP_LOSS" in sell_signal.reason:
+        if position.order_uuid == "EXCHANGE_SYNC" or position.strategy_id == "exchange_sync":
+            return False
+        if any(tag in sell_signal.reason for tag in ("STOP_LOSS", "ENGINE_STOP", "HARD_SL")):
             return False
         return price > position.buy_price
 
@@ -929,6 +937,14 @@ class Trader:
             filled_qty=position.volume,
             order_uuid=position.order_uuid,
         )
+        for _s in self._scenarios:
+            if _s.scenario_id == position.scenario_id:
+                _s.strategy.on_position_reentered(
+                    position.ticker,
+                    price,
+                    reason=original_reason,
+                )
+                break
 
         logger.info(
             f"[Re-entry] {position.ticker} | "
@@ -1305,6 +1321,85 @@ class Trader:
             "total_trades":    len(self._obs_session_trades),
             "sell_count":      len(sells),
             "win_rate":        len(wins) / len(sells) * 100 if sells else 0.0,
+        }
+
+    def _build_analysis_summary(self, scenario_id: str, equity: float) -> dict:
+        """시나리오 단위 분석 로그용 요약을 만든다."""
+        scenario_trades = [
+            t for t in self._obs_session_trades
+            if t.scenario_id == scenario_id
+        ]
+        buys = [t for t in scenario_trades if t.action == "BUY"]
+        sells = [t for t in scenario_trades if t.action == "SELL"]
+        wins = [t for t in sells if t.pnl > 0]
+        realized_pnl = sum(t.pnl for t in sells)
+        invested_krw = sum(t.amount_krw for t in buys)
+        open_positions = [
+            p for p in self.state.all_positions()
+            if p.scenario_id == scenario_id
+        ]
+        return {
+            "scenario_id": scenario_id,
+            "is_paper": False,
+            "scope": "scenario",
+            "account_equity": equity,
+            "session_realized_pnl": realized_pnl,
+            "session_realized_pnl_pct": (
+                realized_pnl / invested_krw * 100 if invested_krw else 0.0
+            ),
+            "total_trades": len(scenario_trades),
+            "buy_count": len(buys),
+            "sell_count": len(sells),
+            "win_rate": len(wins) / len(sells) * 100 if sells else 0.0,
+            "open_positions": len(open_positions),
+        }
+
+    def _build_analysis_diagnostics(self, scenario: RealScenario) -> dict:
+        """원인 추적용 부가 메타데이터를 남긴다."""
+        action_counts: dict[str, int] = {}
+        for trade in self._obs_session_trades:
+            if trade.scenario_id != scenario.scenario_id:
+                continue
+            action_counts[trade.action] = action_counts.get(trade.action, 0) + 1
+
+        open_positions: list[dict] = []
+        external_sync_count = 0
+        for pos in self.state.all_positions():
+            if pos.scenario_id != scenario.scenario_id:
+                continue
+            is_external_sync = (
+                pos.order_uuid == "EXCHANGE_SYNC"
+                or pos.strategy_id == "exchange_sync"
+            )
+            if is_external_sync:
+                external_sync_count += 1
+            open_positions.append({
+                "ticker": pos.ticker,
+                "buy_price": pos.buy_price,
+                "stop_loss_price": pos.stop_loss_price,
+                "take_profit_price": pos.take_profit_price,
+                "locked_profit_price": pos.locked_profit_price,
+                "buy_time": pos.buy_time,
+                "order_uuid": pos.order_uuid,
+                "strategy_id": pos.strategy_id,
+                "is_external_sync": is_external_sync,
+            })
+
+        return {
+            "session_id": self.session_manager.session_id,
+            "mode": "real",
+            "multi_scenario_mode": self._multi_scenario_mode,
+            "strategy_id": scenario.strategy_id,
+            "scenario_id": scenario.scenario_id,
+            "scenario_weight_pct": scenario.weight_pct,
+            "budget_pct": scenario.budget_pct,
+            "configured_ticker_count": scenario.ticker_count,
+            "active_ticker_count": len(scenario.tickers),
+            "active_tickers": list(scenario.tickers),
+            "trade_action_counts": action_counts,
+            "open_position_count": len(open_positions),
+            "external_sync_position_count": external_sync_count,
+            "open_positions": open_positions,
         }
 
     # ─── 스케줄러 호출: 전체 매도 ────────────────────────────────────────────

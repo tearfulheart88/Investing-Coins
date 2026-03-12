@@ -91,6 +91,19 @@ class RSIStrategy(BaseStrategy):
             f"{_COOLDOWN_HOURS}h 재진입 금지 | reason={reason}"
         )
 
+    def on_position_reentered(
+        self,
+        ticker: str,
+        new_entry_price: float,
+        reason: str = "",
+    ) -> None:
+        # Re-entry ???곗쟾 peak瑜?湲곗??쇰줈 ?뱀쭠?섎㈃ ?몃젅?쇰쭅 ?좏샇媛 諛섎났 ?깮?꽦???덉쓣 ???덈떎.
+        self._peaks[ticker] = new_entry_price
+        logger.info(
+            f"[mr_rsi] ?ъ쭊???뺣낫 珥덇린??| {ticker} | "
+            f"entry={new_entry_price:,.0f} | reason={reason}"
+        )
+
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
         cd_end = self._cooldowns.get(ticker, 0.0)
         if cd_end > 0:

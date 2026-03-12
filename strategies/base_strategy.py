@@ -141,8 +141,20 @@ class BaseStrategy(ABC):
         """
         포지션 종료 시 호출 (매도, 손절, 스케줄 매도 등 모든 경로).
         내부 추적 상태(peak, 타임컷 연장 등)를 정리한다.
-        reason: 매도 사유 ("STOP_LOSS", "TRAIL_DROP", "SCHEDULED_09H" 등)
+    reason: 매도 사유 ("ENGINE_STOP", "HARD_SL", "TRAIL_DROP", "SCHEDULED_09H" 등)
         기본 구현: 아무것도 하지 않음.
+        """
+
+    def on_position_reentered(
+        self,
+        ticker: str,
+        new_entry_price: float,
+        reason: str = "",
+    ) -> None:
+        """
+        ?ъ쭊??湲곗??媛 媛깆떊 ???몄텧.
+        ?꾨왂 ?대? peak/??꾩뻔 湲곗? ?곹깭瑜??좉퇋 吏꾩엯媛濡?珥덇린?뷀븷 ???ъ슜?쒕떎.
+        湲곕낯 援ы쁽: ?꾨Т寃껊룄 ?섏? ?딆쓬.
         """
 
     def reset_daily(self) -> None:

@@ -44,6 +44,9 @@ STRATEGIES = {
     "smrh_stop              │  SMRH 스탑매매 HA돌파 (4h+30m 멀티타임프레임)": ("trend_following", "smrh_stop"),
 }
 STRATEGY_KEYS = list(STRATEGIES.keys())
+SCENARIO_TO_STRATEGY_KEY = {
+    scenario_id: key for key, (_, scenario_id) in STRATEGIES.items()
+}
 
 ALL_TICKERS: list[str] = []   # 런타임에 동적으로 채워짐
 
@@ -67,11 +70,26 @@ C = type("C", (), {
 
 class RealScenarioRow:
     """UI에서 실제거래 시나리오 하나를 나타내는 데이터 클래스"""
-    def __init__(self, idx: int = 0) -> None:
-        self.strategy_var   = tk.StringVar(value=STRATEGY_KEYS[idx % len(STRATEGY_KEYS)])
-        self.weight_var     = tk.StringVar(value="100")      # 계좌 자금 중 비중 (%)
-        self.ticker_count_var = tk.StringVar(value=str(config.PAPER_DEFAULT_TICKER_COUNT))  # 거래량 상위 N개
-        self.budget_pct_var = tk.StringVar(value="30")       # 시나리오 자금의 1회 거래 비중 (%)
+    def __init__(
+        self,
+        idx: int = 0,
+        strategy_key: str | None = None,
+        weight_pct: float | int | None = None,
+        ticker_count: int | None = None,
+        budget_pct: float | int | None = None,
+    ) -> None:
+        self.strategy_var = tk.StringVar(
+            value=strategy_key or STRATEGY_KEYS[idx % len(STRATEGY_KEYS)]
+        )
+        self.weight_var = tk.StringVar(
+            value=f"{float(weight_pct):g}" if weight_pct is not None else "100"
+        )  # 계좌 자금 중 비중 (%)
+        self.ticker_count_var = tk.StringVar(
+            value=str(ticker_count if ticker_count is not None else config.PAPER_DEFAULT_TICKER_COUNT)
+        )  # 거래량 상위 N개
+        self.budget_pct_var = tk.StringVar(
+            value=f"{float(budget_pct):g}" if budget_pct is not None else f"{config.REAL_DEFAULT_BUDGET_PCT:g}"
+        )  # 시나리오 자금의 1회 거래 비중 (%)
         self._frame: tk.Frame | None = None
 
 
@@ -79,14 +97,27 @@ class RealScenarioRow:
 
 class PaperAccountRow:
     """UI에서 가상계좌 하나를 나타내는 데이터 클래스"""
-    def __init__(self, account_id: str | None = None) -> None:
+    def __init__(
+        self,
+        account_id: str | None = None,
+        strategy_key: str | None = None,
+        balance_krw: int | float | None = None,
+        ticker_count: int | None = None,
+        budget_pct: float | int | None = None,
+    ) -> None:
         self.account_id           = account_id or f"ACC-{uuid.uuid4().hex[:6].upper()}"
         self.name_var             = tk.StringVar(value=self.account_id)
-        self.strategy_var         = tk.StringVar(value=STRATEGY_KEYS[0])
-        self.balance_var          = tk.StringVar(value=f"{config.PAPER_DEFAULT_BALANCE:,}")
+        self.strategy_var         = tk.StringVar(value=strategy_key or STRATEGY_KEYS[0])
+        self.balance_var          = tk.StringVar(
+            value=f"{int(balance_krw if balance_krw is not None else config.PAPER_DEFAULT_BALANCE):,}"
+        )
         self.weight_var           = tk.StringVar(value="")           # 가중치% (자동계산)
-        self.ticker_count_var     = tk.StringVar(value=str(config.PAPER_DEFAULT_TICKER_COUNT))
-        self.budget_pct_var       = tk.StringVar(value=str(int(config.PAPER_DEFAULT_BUDGET_PCT)))
+        self.ticker_count_var     = tk.StringVar(
+            value=str(ticker_count if ticker_count is not None else config.PAPER_DEFAULT_TICKER_COUNT)
+        )
+        self.budget_pct_var       = tk.StringVar(
+            value=f"{float(budget_pct):g}" if budget_pct is not None else f"{config.PAPER_DEFAULT_BUDGET_PCT:g}"
+        )
         self._frame: tk.Frame | None = None
 
 
@@ -530,11 +561,30 @@ class TradingApp(tk.Tk):
         self._real_card_inner = tk.Frame(real_wrap, bg=C.BG2)
         self._real_card_inner.pack(fill="x")
 
-        # 기본 1개 시나리오 생성
-        row0 = RealScenarioRow(0)
-        self._real_scenario_rows.append(row0)
-        self._render_real_scenario_row(row0)
-        self._update_real_weights()
+        # 기본 실거래 시나리오 생성
+        default_real = getattr(config, "REAL_SCENARIO_DEFAULTS", []) or [
+            {
+                "scenario_id": config.SELECTED_SCENARIO,
+                "weight_pct": 100.0,
+                "ticker_count": config.TOP_TICKERS_COUNT,
+                "budget_pct": config.REAL_DEFAULT_BUDGET_PCT,
+            }
+        ]
+        for idx, item in enumerate(default_real):
+            strategy_key = SCENARIO_TO_STRATEGY_KEY.get(
+                item.get("scenario_id", ""),
+                STRATEGY_KEYS[idx % len(STRATEGY_KEYS)],
+            )
+            row = RealScenarioRow(
+                idx=idx,
+                strategy_key=strategy_key,
+                weight_pct=item.get("weight_pct"),
+                ticker_count=item.get("ticker_count"),
+                budget_pct=item.get("budget_pct"),
+            )
+            self._real_scenario_rows.append(row)
+            self._render_real_scenario_row(row)
+        self._update_real_weights(rebalance=False)
 
         # 종목 헤더
         self._ticker_vars: dict[str, tk.BooleanVar] = {}
@@ -682,17 +732,17 @@ class TradingApp(tk.Tk):
                 if scen_id in self._reentry_vars:
                     self._reentry_vars[scen_id].set(True)
 
-    def _update_real_weights(self) -> None:
+    def _update_real_weights(self, rebalance: bool = True) -> None:
         """실제거래 비중% 합계 표시 + 추정 예산 갱신"""
         n = len(self._real_scenario_rows)
         if n == 0:
             return
         # 자동 균등배분 (사용자가 수동으로 바꿀 수 있음)
-        if n > 1:
+        if rebalance and n > 1:
             per = round(100.0 / n, 1)
             for row in self._real_scenario_rows:
                 row.weight_var.set(str(per))
-        else:
+        elif rebalance:
             self._real_scenario_rows[0].weight_var.set("100")
         try:
             total_w = sum(float(r.weight_var.get()) for r in self._real_scenario_rows)
@@ -758,11 +808,26 @@ class TradingApp(tk.Tk):
         self._paper_inner.bind("<MouseWheel>", _scroll_paper)
         self._paper_scroll_fn = _scroll_paper
 
-        # 전략 개수만큼 가상계좌 자동 생성 (각 전략 1개씩)
-        for i, key in enumerate(STRATEGY_KEYS):
-            row = PaperAccountRow()
+        # 전략 검증용 기본 가상계좌 생성
+        default_paper = getattr(config, "PAPER_SCENARIO_DEFAULTS", []) or []
+        if not default_paper:
+            default_paper = [
+                {"scenario_id": scen_id}
+                for _, scen_id in STRATEGIES.values()
+            ]
+        for i, item in enumerate(default_paper):
+            strategy_key = SCENARIO_TO_STRATEGY_KEY.get(
+                item.get("scenario_id", ""),
+                STRATEGY_KEYS[i % len(STRATEGY_KEYS)],
+            )
+            row = PaperAccountRow(
+                account_id=f"ACC-{i+1:02d}",
+                strategy_key=strategy_key,
+                balance_krw=item.get("balance_krw", config.PAPER_DEFAULT_BALANCE),
+                ticker_count=item.get("ticker_count", config.PAPER_DEFAULT_TICKER_COUNT),
+                budget_pct=item.get("budget_pct", config.PAPER_DEFAULT_BUDGET_PCT),
+            )
             row.name_var.set(f"ACC-{i+1:02d}")
-            row.strategy_var.set(key)
             self._paper_rows.append(row)
             self._render_paper_row(row)
 
@@ -1027,12 +1092,14 @@ class TradingApp(tk.Tk):
             "rsi_sell":      tk.DoubleVar(value=rsi_p["rsi_sell"]),
             "adx_range_thr": tk.DoubleVar(value=rsi_p["adx_range_thr"]),
             "max_hold_hours":tk.DoubleVar(value=rsi_p["max_hold_hours"]),
+            "hard_sl_pct":   tk.DoubleVar(value=rsi_p.get("hard_sl_pct", 7.0)),
         }
         slider_row("RSI 매수 기준 (<)",      rsi["rsi_buy"],       20, 50, 1,   "RSI<{:.0f}")
         slider_row("RSI 완화 매수 (<,약횡보)", rsi["rsi_buy_range"], 25, 55, 1,   "RSI<{:.0f}")
         slider_row("RSI 매도 기준 (>)",      rsi["rsi_sell"],      50, 80, 1,   "RSI>{:.0f}")
         slider_row("ADX 횡보 분기 기준",     rsi["adx_range_thr"], 10, 30, 1,   "ADX<{:.0f}")
         slider_row("최대 보유 시간",         rsi["max_hold_hours"], 6, 72, 2,   "{:.0f}h")
+        slider_row("하드 손절 (%)",          rsi["hard_sl_pct"],    3, 10, 0.5, "-{:.1f}%")
         self._param_vars["mr_rsi"] = rsi
         reentry_row("mr_rsi")
 
@@ -1236,11 +1303,30 @@ class TradingApp(tk.Tk):
             # ── mr_rsi ──
             import strategies.mr_rsi as _mr_rsi
             rsi = p.get("mr_rsi", {})
-            if "rsi_buy"        in rsi: _mr_rsi._RSI_BUY        = float(rsi["rsi_buy"].get())
-            if "rsi_buy_range"  in rsi: _mr_rsi._RSI_BUY_RANGE  = float(rsi["rsi_buy_range"].get())
-            if "rsi_sell"       in rsi: _mr_rsi._RSI_SELL       = float(rsi["rsi_sell"].get())
-            if "adx_range_thr"  in rsi: _mr_rsi._ADX_RANGE_THR  = float(rsi["adx_range_thr"].get())
-            if "max_hold_hours" in rsi: _mr_rsi._MAX_HOLD_HOURS = float(rsi["max_hold_hours"].get())
+            if "rsi_buy" in rsi:
+                val = float(rsi["rsi_buy"].get())
+                _mr_rsi._RSI_BUY = val
+                config.STRATEGY_PARAMS["mr_rsi"]["rsi_buy"] = val
+            if "rsi_buy_range" in rsi:
+                val = float(rsi["rsi_buy_range"].get())
+                _mr_rsi._RSI_BUY_RANGE = val
+                config.STRATEGY_PARAMS["mr_rsi"]["rsi_buy_range"] = val
+            if "rsi_sell" in rsi:
+                val = float(rsi["rsi_sell"].get())
+                _mr_rsi._RSI_SELL = val
+                config.STRATEGY_PARAMS["mr_rsi"]["rsi_sell"] = val
+            if "adx_range_thr" in rsi:
+                val = float(rsi["adx_range_thr"].get())
+                _mr_rsi._ADX_RANGE_THR = val
+                config.STRATEGY_PARAMS["mr_rsi"]["adx_range_thr"] = val
+            if "max_hold_hours" in rsi:
+                val = float(rsi["max_hold_hours"].get())
+                _mr_rsi._MAX_HOLD_HOURS = val
+                config.STRATEGY_PARAMS["mr_rsi"]["max_hold_hours"] = val
+            if "hard_sl_pct" in rsi:
+                val = float(rsi["hard_sl_pct"].get())
+                _mr_rsi._HARD_SL_PCT = val
+                config.STRATEGY_PARAMS["mr_rsi"]["hard_sl_pct"] = val
 
             # ── mr_bollinger ──
             import strategies.mr_bollinger as _mr_bol
@@ -1315,7 +1401,8 @@ class TradingApp(tk.Tk):
                 f" timecut={_vbf._TIME_CUT_HOURS:.1f}h/{_vbf._MIN_MOMENTUM_PCT:.1f}%"
                 f" vol≥×{_vbf._VOL_MULT:.1f}) | "
                 f"mr_rsi(RSI<{_mr_rsi._RSI_BUY:.0f}or{_mr_rsi._RSI_BUY_RANGE:.0f}"
-                f" >{_mr_rsi._RSI_SELL:.0f} hold={_mr_rsi._MAX_HOLD_HOURS:.0f}h) | "
+                f" ADX<{_mr_rsi._ADX_RANGE_THR:.0f} >{_mr_rsi._RSI_SELL:.0f}"
+                f" hold={_mr_rsi._MAX_HOLD_HOURS:.0f}h hardSL={_mr_rsi._HARD_SL_PCT:.1f}%) | "
                 f"mr_bol(RSI<{_mr_bol._RSI_BUY:.0f} ADX<{_mr_bol._ADX_LIMIT:.0f}"
                 f" std={_mr_bol._BB_STD_RANGE:.1f}/{_mr_bol._BB_STD_TREND:.1f}"
                 f" hold={_mr_bol._MAX_HOLD_HOURS:.0f}h) | "
@@ -1568,7 +1655,7 @@ class TradingApp(tk.Tk):
         try:
             config.BUDGET_PER_TRADE_PCT = float(first_row.budget_pct_var.get())
         except (ValueError, AttributeError):
-            config.BUDGET_PER_TRADE_PCT = 30.0
+            config.BUDGET_PER_TRADE_PCT = config.REAL_DEFAULT_BUDGET_PCT
 
         return True
 
