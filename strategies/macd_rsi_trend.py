@@ -65,6 +65,13 @@ class MACDRSITrendStrategy(BaseStrategy):
             ),
         }
 
+    def get_ticker_selection_profile(self) -> dict:
+        return {
+            "pattern": "trend_macd",
+            "pool_size": 80,
+            "refresh_hours": 1.0,
+        }
+
     # ─── 매수 신호 ────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:

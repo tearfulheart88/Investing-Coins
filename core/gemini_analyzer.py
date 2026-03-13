@@ -97,14 +97,22 @@ class GeminiStrategyAnalyzer:
         # 1) 전략 소스코드 로드
         strategy_code = self._load_strategy_code(scenario_id)
 
-        # 2) 거래 기록 로드
+        # 2) 거래 기록 / 세션 문맥 로드
+        session_payload = self._load_latest_session_payload(scenario_id) if not session_id else None
         trades = self._load_trades(scenario_id, max_trades, session_id)
+        analysis_context = self._build_analysis_context(scenario_id, trades, session_payload)
 
         # 3) 거래 통계 계산
-        stats = self._compute_stats(trades)
+        stats = self._compute_stats(trades, analysis_context)
 
         # 4) Gemini 프롬프트 구성
-        prompt = self._build_gemini_prompt(scenario_id, strategy_code, trades, stats)
+        prompt = self._build_gemini_prompt(
+            scenario_id,
+            strategy_code,
+            trades,
+            stats,
+            analysis_context,
+        )
 
         # 5) Gemini API 호출
         logger.info(f"[GeminiAnalyzer] Gemini API 호출 | scenario={scenario_id} | trades={len(trades)}")
@@ -119,7 +127,7 @@ class GeminiStrategyAnalyzer:
 
         # 7) Claude 프롬프트 JSON 생성
         claude_prompt = self._build_claude_prompt(
-            scenario_id, strategy_code, trades, stats, parsed
+            scenario_id, strategy_code, trades, stats, parsed, analysis_context
         )
 
         result = {
@@ -133,6 +141,7 @@ class GeminiStrategyAnalyzer:
             "gemini_analysis":    raw_text,
             "issues":             parsed.get("issues", []),
             "improvements":       parsed.get("improvements", []),
+            "analysis_context":   analysis_context,
             "claude_prompt_json": claude_prompt,
         }
 
@@ -224,9 +233,123 @@ class GeminiStrategyAnalyzer:
             logger.warning(f"[GeminiAnalyzer] 거래 기록 로드 실패: {e}")
             return []
 
+    def _load_latest_session_payload(self, scenario_id: str) -> dict | None:
+        """최신 세션 payload 전체를 불러온다."""
+        try:
+            from logging_.session_log_writer import load_latest_session_payload
+            payload = load_latest_session_payload(scenario_id)
+            if payload is not None:
+                logger.info(f"[GeminiAnalyzer] 최신 세션 payload 로드 | scenario={scenario_id}")
+            return payload
+        except Exception as e:
+            logger.warning(f"[GeminiAnalyzer] 최신 세션 payload 로드 실패: {e}")
+            return None
+
+    def _load_live_open_positions(self, scenario_id: str) -> list[dict]:
+        """현재 positions.json 에서 시나리오별 오픈 포지션을 불러온다."""
+        path = getattr(config, "POSITIONS_FILE", "")
+        if not path or not os.path.exists(path):
+            return []
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as e:
+            logger.warning(f"[GeminiAnalyzer] positions.json 로드 실패: {e}")
+            return []
+
+        positions = payload.get("positions", {}) or {}
+        result: list[dict] = []
+        for ticker, pos in positions.items():
+            if pos.get("scenario_id") != scenario_id:
+                continue
+            normalized = {
+                "ticker": ticker,
+                "buy_price": pos.get("buy_price"),
+                "stop_loss_price": pos.get("stop_loss_price"),
+                "take_profit_price": pos.get("take_profit_price"),
+                "locked_profit_price": pos.get("locked_profit_price"),
+                "buy_time": pos.get("buy_time"),
+                "order_uuid": pos.get("order_uuid"),
+                "strategy_id": pos.get("strategy_id"),
+                "is_external_sync": (
+                    pos.get("order_uuid") == "EXCHANGE_SYNC"
+                    or pos.get("strategy_id") == "exchange_sync"
+                ),
+            }
+            normalized["age_hours"] = self._compute_age_hours(normalized.get("buy_time"))
+            result.append(normalized)
+        return result
+
+    def _compute_age_hours(self, buy_time: str | None) -> float | None:
+        if not buy_time:
+            return None
+        try:
+            dt = datetime.fromisoformat(buy_time)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=KST)
+            return round((datetime.now(KST) - dt.astimezone(KST)).total_seconds() / 3600, 3)
+        except Exception:
+            return None
+
+    def _build_analysis_context(
+        self,
+        scenario_id: str,
+        trades: list[dict],
+        session_payload: dict | None,
+    ) -> dict:
+        summary = (session_payload or {}).get("summary", {}) or {}
+        diagnostics = (session_payload or {}).get("diagnostics", {}) or {}
+
+        open_positions = diagnostics.get("open_positions") or self._load_live_open_positions(scenario_id)
+        normalized_open_positions: list[dict] = []
+        for pos in open_positions:
+            normalized = {
+                "ticker": pos.get("ticker"),
+                "buy_price": pos.get("buy_price"),
+                "stop_loss_price": pos.get("stop_loss_price"),
+                "take_profit_price": pos.get("take_profit_price"),
+                "locked_profit_price": pos.get("locked_profit_price"),
+                "buy_time": pos.get("buy_time"),
+                "order_uuid": pos.get("order_uuid"),
+                "strategy_id": pos.get("strategy_id"),
+                "is_external_sync": bool(pos.get("is_external_sync", False)),
+            }
+            normalized["age_hours"] = self._compute_age_hours(normalized.get("buy_time"))
+            normalized_open_positions.append(normalized)
+
+        notes: list[str] = []
+        if normalized_open_positions and not any(t.get("action") == "SELL" for t in trades):
+            notes.append(
+                "최근 세션에 완료 매도가 없더라도 오픈 포지션이 존재하면 매도 기능 미작동으로 단정하면 안 됩니다."
+            )
+
+        suspicious_buy_reasons = sorted({
+            t.get("reason") for t in trades
+            if t.get("action") == "BUY"
+            and isinstance(t.get("reason"), str)
+            and t.get("reason", "").startswith("SMRH_STOP(")
+        })
+        if suspicious_buy_reasons:
+            notes.append(
+                "최근 세션 로그에 다른 전략 계열 매수 사유가 섞여 보입니다. 멀티시나리오 세션 로그 오염 가능성을 먼저 점검해야 합니다."
+            )
+
+        recent_signal_traces = (diagnostics.get("recent_signal_traces") or [])[-10:]
+        return {
+            "session_saved_at": (session_payload or {}).get("saved_at"),
+            "mode": (session_payload or {}).get("mode"),
+            "session_summary": summary,
+            "trade_action_counts": diagnostics.get("trade_action_counts", {}),
+            "open_position_count": len(normalized_open_positions),
+            "open_positions": normalized_open_positions,
+            "recent_signal_traces": recent_signal_traces,
+            "notes": notes,
+        }
+
     # ─── 통계 ─────────────────────────────────────────────────────────────────
 
-    def _compute_stats(self, trades: list[dict]) -> dict:
+    def _compute_stats(self, trades: list[dict], analysis_context: dict | None = None) -> dict:
         """거래 통계 계산."""
         perf_trades = [
             t for t in trades
@@ -251,6 +374,13 @@ class GeminiStrategyAnalyzer:
             r = t.get("reason", "UNKNOWN")
             reasons[r] = reasons.get(r, 0) + 1
 
+        buy_reasons: dict[str, int] = {}
+        for t in buys:
+            r = t.get("reason", "UNKNOWN")
+            buy_reasons[r] = buy_reasons.get(r, 0) + 1
+
+        context = analysis_context or {}
+
         return {
             "total":       len(strategy_trades),
             "buy_count":   len(buys),
@@ -263,8 +393,12 @@ class GeminiStrategyAnalyzer:
                 t.get("pnl_krw", 0) or 0 for t in sells
             ), 0),
             "exit_reasons": reasons,
+            "buy_reasons": buy_reasons,
             "reentry_count": sum(1 for t in trades if t.get("action") == "REENTRY"),
             "excluded_external_count": len(perf_trades) - len(strategy_trades),
+            "open_position_count": context.get("open_position_count", 0),
+            "has_open_positions": bool(context.get("open_position_count", 0)),
+            "analysis_notes": context.get("notes", []),
         }
 
     # ─── Gemini 프롬프트 ──────────────────────────────────────────────────────
@@ -275,6 +409,7 @@ class GeminiStrategyAnalyzer:
         strategy_code: str,
         trades: list[dict],
         stats: dict,
+        analysis_context: dict,
     ) -> str:
         """Gemini API에 전달할 분석 프롬프트 생성."""
         # 거래 요약 (토큰 절약을 위해 핵심 필드만)
@@ -305,6 +440,9 @@ class GeminiStrategyAnalyzer:
 
 === 거래 성과 통계 ===
 {json.dumps(stats, ensure_ascii=False, indent=2)}
+
+=== 최신 세션 문맥 ===
+{json.dumps(analysis_context, ensure_ascii=False, indent=2)}
 
 === 최근 거래 내역 (최대 30건) ===
 {json.dumps(trade_summary, ensure_ascii=False, indent=2)}
@@ -339,6 +477,10 @@ class GeminiStrategyAnalyzer:
 - 승률, 평균 수익률, 매도 이유 분포를 핵심 지표로 사용
 - 구체적인 파라미터 조정값 제안 (예: k_min=0.35→0.25)
 - 한국어로 작성
+- sell_count가 0이어도 open_position_count가 1 이상이면 "매도 기능 미작동"으로 단정하지 말 것
+- requires_scheduled_sell=False 는 09:00 예약 청산 미사용 뜻이지, 루프 내 should_sell_on_signal 비활성화 의미가 아님
+- 제공된 코드에 실제로 없는 내용만 "누락"으로 지적할 것
+- 다른 전략 사유가 세션 로그에 섞여 보이면 로그 오염 가능성을 먼저 지적하고, 해당 사유를 이 전략 고유 로직으로 단정하지 말 것
 - JSON 형식만 반환 (마크다운 코드블록 없이)"""
 
         return prompt
@@ -378,6 +520,7 @@ class GeminiStrategyAnalyzer:
         trades: list[dict],
         stats: dict,
         parsed: dict,
+        analysis_context: dict,
     ) -> dict:
         """
         Claude에게 전달할 프롬프트 JSON 생성.
@@ -412,6 +555,11 @@ class GeminiStrategyAnalyzer:
 {json.dumps(stats, ensure_ascii=False, indent=2)}
 ```
 
+## 최신 세션 문맥
+```json
+{json.dumps(analysis_context, ensure_ascii=False, indent=2)}
+```
+
 ## 현재 전략 파라미터
 ```python
 {json.dumps(config.STRATEGY_PARAMS, ensure_ascii=False, indent=2)}
@@ -434,6 +582,7 @@ class GeminiStrategyAnalyzer:
             "generated_at":   datetime.now(KST).isoformat(),
             "scenario_id":    scenario_id,
             "performance_snapshot": stats,
+            "analysis_context": analysis_context,
             "gemini_pre_analysis":  parsed,
             "claude_request": {
                 "system": system_msg,

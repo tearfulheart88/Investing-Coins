@@ -161,17 +161,29 @@ def load_latest_session_log(
     is_paper를 지정하면 해당 모드 폴더만 조회하고,
     지정하지 않으면 real/paper/legacy를 모두 조회해 가장 최근 파일을 고른다.
     """
+    payload = load_latest_session_payload(scenario_id, is_paper=is_paper)
+    if not payload:
+        return None
+    trades = payload.get("trades", [])
+    return trades[-max_trades:]
+
+
+def load_latest_session_payload(
+    scenario_id: str,
+    is_paper: bool | None = None,
+) -> dict | None:
+    """해당 시나리오의 최신 세션 payload 전체를 반환한다."""
     matches = _collect_logs(scenario_id=scenario_id, is_paper=is_paper)
     if not matches:
         logger.debug(f"[SessionLog] {scenario_id} 분석 로그 없음")
         return None
 
     latest_path, payload = matches[0]
-    trades = payload.get("trades", [])
+    trade_count = len(payload.get("trades", []))
     logger.info(
-        f"[SessionLog] 분석 로그 로드: {os.path.basename(latest_path)} | {len(trades)}건"
+        f"[SessionLog] 분석 로그 payload 로드: {os.path.basename(latest_path)} | {trade_count}건"
     )
-    return trades[-max_trades:]
+    return payload
 
 
 def list_session_logs(

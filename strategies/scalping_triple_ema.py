@@ -91,6 +91,13 @@ class TripleEMAStrategy(BaseStrategy):
             _HTF_INTERVAL: _HTF_EMA,
         }
 
+    def get_ticker_selection_profile(self) -> dict:
+        return {
+            "pattern": "scalp_trend",
+            "pool_size": 100,
+            "refresh_hours": 0.25,
+        }
+
     # ─── 매수 신호 ────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:

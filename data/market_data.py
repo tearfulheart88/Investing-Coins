@@ -312,6 +312,84 @@ class MarketData:
         self._intraday_cache[cache_key] = (df, now_ts)
         return df
 
+    @staticmethod
+    def _format_index_ts(value) -> str | None:
+        if value is None:
+            return None
+        try:
+            ts = pd.Timestamp(value)
+            if ts.tzinfo is None:
+                ts = ts.tz_localize(KST)
+            else:
+                ts = ts.tz_convert(KST)
+            return ts.isoformat()
+        except Exception:
+            return str(value)
+
+    def get_intraday_debug_snapshot(
+        self,
+        ticker: str,
+        interval: str,
+    ) -> dict:
+        """
+        신호 불일치 추적용 분봉 스냅샷.
+
+        동일 ticker/interval에 대해 캐시 시각, 마지막 캔들 시각, 최근 2개 캔들의 OHLCV를
+        공통 포맷으로 남겨 real/paper 간 비교를 쉽게 만든다.
+        """
+        cache_key = (ticker, interval)
+        cached = self._intraday_cache.get(cache_key)
+        snapshot = {
+            "ticker": ticker,
+            "interval": interval,
+            "cache_present": cached is not None,
+        }
+        if not cached:
+            return snapshot
+
+        df, fetched_ts = cached
+        snapshot.update({
+            "cache_rows": len(df),
+            "cache_fetched_at": datetime.fromtimestamp(fetched_ts, KST).isoformat(),
+            "cache_age_sec": round(max(time.time() - fetched_ts, 0.0), 3),
+        })
+        if df.empty:
+            return snapshot
+
+        def _row_payload(index_pos: int) -> dict | None:
+            if len(df) < abs(index_pos):
+                return None
+            row = df.iloc[index_pos]
+            ts = df.index[index_pos]
+            return {
+                "candle_at": self._format_index_ts(ts),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row.get("volume", 0.0)),
+            }
+
+        snapshot["last_candle"] = _row_payload(-1)
+        if len(df) >= 2:
+            snapshot["prev_candle"] = _row_payload(-2)
+        return snapshot
+
+    def build_signal_debug_context(
+        self,
+        ticker: str,
+        intervals: list[str],
+    ) -> dict:
+        """
+        전략 신호 trace에 넣을 공통 시장데이터 스냅샷을 만든다.
+        """
+        context: dict[str, dict] = {}
+        for interval in intervals:
+            if interval in context:
+                continue
+            context[interval] = self.get_intraday_debug_snapshot(ticker, interval)
+        return context
+
     def _fetch_ohlcv_intraday(
         self, ticker: str, interval: str, count: int
     ) -> pd.DataFrame:
@@ -799,26 +877,322 @@ class MarketData:
         keep_set = set(keep_list)
         blk = set(blacklist or set())
         requirements = strategy.get_history_requirements()
+        profile = self.get_ticker_selection_profile(strategy, n, pool_size)
 
         if base_tickers is None:
-            effective_pool = pool_size if pool_size is not None else min(max(n * 5, 50), 200)
+            effective_pool = profile["pool_size"]
             base_tickers = self.get_top_tickers_by_volume(effective_pool)
 
-        selected: list[str] = []
+        eligible: list[str] = []
         for ticker in base_tickers:
-            if ticker in blk or ticker in keep_set or ticker in selected:
+            if ticker in blk or ticker in keep_set or ticker in eligible:
                 continue
 
             ok, _ = self.has_sufficient_history(ticker, requirements)
             if not ok:
                 continue
 
-            selected.append(ticker)
-            if len(selected) >= n:
-                break
+            eligible.append(ticker)
+
+        ranked = self._rank_tickers_for_strategy(strategy, eligible, profile)
+        selected = ranked[:n]
 
         for ticker in keep_list:
             if ticker not in selected:
                 selected.append(ticker)
 
         return selected
+
+    def get_ticker_selection_profile(
+        self,
+        strategy,
+        n: int,
+        pool_size: int | None = None,
+    ) -> dict:
+        """Refresh 濡쒖쭅怨??꾨왂蹂?醫낅ぉ ?좊퀎 ?꾨줈?꾩쓣 怨듭떇 API濡?諛섑솚?쒕떎."""
+        return self._build_ticker_selection_profile(strategy, n, pool_size)
+
+    def _build_ticker_selection_profile(
+        self,
+        strategy,
+        n: int,
+        pool_size: int | None = None,
+    ) -> dict:
+        scenario_id = strategy.get_scenario_id()
+        default_pool = min(max(n * 5, 50), 200)
+        profile = {
+            "pattern": "generic_liquidity",
+            "pool_size": default_pool,
+            "refresh_hours": 1.0,
+        }
+
+        profile_map = {
+            "vb_noise_filter": {"pattern": "vol_breakout_filtered", "pool_size": 80, "refresh_hours": 0.5},
+            "vb_standard": {"pattern": "vol_breakout_basic", "pool_size": 80, "refresh_hours": 0.5},
+            "mr_rsi": {"pattern": "mean_reversion_rsi", "pool_size": 70, "refresh_hours": 1.0},
+            "mr_bollinger": {"pattern": "mean_reversion_band", "pool_size": 70, "refresh_hours": 1.0},
+            "scalping_triple_ema": {"pattern": "scalp_trend", "pool_size": 100, "refresh_hours": 0.25},
+            "scalping_bb_rsi": {"pattern": "scalp_range", "pool_size": 100, "refresh_hours": 0.25},
+            "scalping_5ema_reversal": {"pattern": "scalp_reversal", "pool_size": 100, "refresh_hours": 0.25},
+            "macd_rsi_trend": {"pattern": "trend_macd", "pool_size": 80, "refresh_hours": 1.0},
+            "smrh_stop": {"pattern": "trend_breakout_defensive", "pool_size": 90, "refresh_hours": 0.5},
+            "pump_catcher": {"pattern": "pump_event", "pool_size": 180, "refresh_hours": 0.1667},
+        }
+        profile.update(profile_map.get(scenario_id, {}))
+
+        custom_profile = {}
+        try:
+            custom_profile = strategy.get_ticker_selection_profile() or {}
+        except Exception:
+            custom_profile = {}
+        profile.update(custom_profile)
+
+        if pool_size is not None:
+            profile["pool_size"] = pool_size
+
+        profile["pool_size"] = int(min(max(int(profile.get("pool_size", default_pool)), max(n, 1)), 200))
+        profile["refresh_hours"] = float(max(float(profile.get("refresh_hours", 1.0)), 0.05))
+        return profile
+
+    def _rank_tickers_for_strategy(
+        self,
+        strategy,
+        candidates: list[str],
+        profile: dict,
+    ) -> list[str]:
+        if not candidates:
+            return []
+
+        scored: list[tuple[float, int, str]] = []
+        total = len(candidates)
+        pattern = profile.get("pattern", "generic_liquidity")
+
+        for idx, ticker in enumerate(candidates):
+            try:
+                score = self._score_ticker_for_pattern(pattern, ticker, idx, total)
+            except DataFetchError:
+                continue
+            except Exception as e:
+                logger.debug(f"[TickerSelect] score error | {strategy.get_scenario_id()} | {ticker}: {e}")
+                continue
+
+            if score is None:
+                continue
+            scored.append((score, idx, ticker))
+
+        if not scored:
+            return candidates
+
+        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+        return [ticker for _, _, ticker in scored]
+
+    def _score_ticker_for_pattern(
+        self,
+        pattern: str,
+        ticker: str,
+        rank_idx: int,
+        total: int,
+    ) -> float | None:
+        base = self._base_liquidity_score(rank_idx, total)
+
+        if pattern == "mean_reversion_rsi":
+            price = self._get_last_close(ticker, "minute60", 10)
+            ema200_4h = self.compute_ema_intraday(ticker, 200, "minute240")
+            if price < ema200_4h:
+                return None
+            rsi_1h = self.compute_rsi_intraday(ticker, 14, "minute60")
+            adx_1h = self.compute_adx(ticker, 14, "minute60")
+            change_4h = self._compute_intraday_change_pct(ticker, "minute60", 4)
+            return (
+                base
+                + max(0.0, 42.0 - rsi_1h) * 1.8
+                + max(0.0, 24.0 - adx_1h) * 0.5
+                + max(0.0, -change_4h) * 0.5
+            )
+
+        if pattern == "mean_reversion_band":
+            price = self._get_last_close(ticker, "minute60", 30)
+            ema200_4h = self.compute_ema_intraday(ticker, 200, "minute240")
+            if price < ema200_4h:
+                return None
+            adx_1h = self.compute_adx(ticker, 14, "minute60")
+            if adx_1h >= 35.0:
+                return None
+            rsi_1h = self.compute_rsi_intraday(ticker, 14, "minute60")
+            _, _, lower = self.compute_bollinger_intraday(ticker, 20, 1.5 if adx_1h < 20.0 else 2.0, "minute60")
+            distance_to_lower = ((price - lower) / price * 100.0) if price > 0 else 9.9
+            return (
+                base
+                + max(0.0, 32.0 - adx_1h) * 0.8
+                + max(0.0, 45.0 - rsi_1h) * 1.0
+                + max(0.0, 3.0 - max(distance_to_lower, 0.0)) * 4.0
+            )
+
+        if pattern == "trend_breakout_defensive":
+            price = self._get_last_close(ticker, "minute30", 40)
+            ma20d = self.compute_ma(ticker, 20)
+            if price < ma20d:
+                return None
+            rsi_4h = self.compute_rsi_intraday(ticker, 14, "minute240")
+            rsi_30m = self.compute_rsi_intraday(ticker, 14, "minute30")
+            if rsi_4h > 80.0 or rsi_30m > 70.0:
+                return None
+            vol_ratio_30m = self._compute_volume_ratio(ticker, "minute30", 20)
+            change_30m = self._compute_intraday_change_pct(ticker, "minute30", 4)
+            return (
+                base
+                + max(0.0, min(vol_ratio_30m, 3.0) - 0.8) * 6.0
+                + max(0.0, rsi_4h - 48.0) * 0.5
+                + max(0.0, change_30m) * 1.2
+            )
+
+        if pattern == "trend_macd":
+            price = self._get_last_close(ticker, "minute60", 40)
+            ema200_4h = self.compute_ema_intraday(ticker, 200, "minute240")
+            if price < ema200_4h:
+                return None
+            rsi_1h = self.compute_rsi_intraday(ticker, 14, "minute60")
+            if rsi_1h < 45.0 or rsi_1h > 75.0:
+                return None
+            vol_ratio_1h = self._compute_volume_ratio(ticker, "minute60", 20)
+            change_4h = self._compute_intraday_change_pct(ticker, "minute60", 4)
+            return (
+                base
+                + max(0.0, rsi_1h - 48.0) * 0.7
+                + max(0.0, min(vol_ratio_1h, 3.0) - 0.8) * 4.0
+                + max(0.0, change_4h) * 0.8
+            )
+
+        if pattern == "vol_breakout_filtered":
+            price = self._get_last_close(ticker, "minute60", 20)
+            ema200_4h = self.compute_ema_intraday(ticker, 200, "minute240")
+            if price < ema200_4h:
+                return None
+            adx_1h = self.compute_adx(ticker, 14, "minute60")
+            vol_ratio_5m = self._compute_volume_ratio(ticker, "minute5", 20)
+            day_range_pct = self._compute_day_range_pct(ticker)
+            return (
+                base
+                + max(0.0, adx_1h - 12.0) * 0.7
+                + max(0.0, min(vol_ratio_5m, 3.0) - 0.7) * 4.0
+                + max(0.0, day_range_pct - 2.0) * 1.1
+            )
+
+        if pattern == "vol_breakout_basic":
+            adx_1h = self.compute_adx(ticker, 14, "minute60")
+            vol_ratio_5m = self._compute_volume_ratio(ticker, "minute5", 20)
+            day_range_pct = self._compute_day_range_pct(ticker)
+            return (
+                base
+                + max(0.0, adx_1h - 10.0) * 0.6
+                + max(0.0, min(vol_ratio_5m, 3.0) - 0.7) * 3.5
+                + max(0.0, day_range_pct - 2.0) * 1.0
+            )
+
+        if pattern == "scalp_trend":
+            adx_5m = self.compute_adx(ticker, 14, "minute5")
+            vol_ratio_5m = self._compute_volume_ratio(ticker, "minute5", 20)
+            change_1h = self._compute_intraday_change_pct(ticker, "minute5", 12)
+            return (
+                base
+                + max(0.0, adx_5m - 18.0) * 0.9
+                + max(0.0, min(vol_ratio_5m, 4.0) - 0.8) * 5.0
+                + max(0.0, change_1h) * 1.5
+            )
+
+        if pattern == "scalp_range":
+            adx_15m = self.compute_adx(ticker, 14, "minute15")
+            rsi_15m = self.compute_rsi_intraday(ticker, 14, "minute15")
+            vol_ratio_15m = self._compute_volume_ratio(ticker, "minute15", 20)
+            return (
+                base
+                + max(0.0, 28.0 - adx_15m) * 0.9
+                + max(0.0, 52.0 - rsi_15m) * 0.4
+                + max(0.0, min(vol_ratio_15m, 3.0) - 0.6) * 2.5
+            )
+
+        if pattern == "scalp_reversal":
+            rsi_5m = self.compute_rsi_intraday(ticker, 14, "minute5")
+            adx_5m = self.compute_adx(ticker, 14, "minute5")
+            vol_ratio_5m = self._compute_volume_ratio(ticker, "minute5", 20)
+            return (
+                base
+                + max(0.0, 45.0 - rsi_5m) * 1.2
+                + max(0.0, adx_5m - 15.0) * 0.5
+                + max(0.0, min(vol_ratio_5m, 4.0) - 0.8) * 4.0
+            )
+
+        if pattern == "pump_event":
+            df_1m = self.get_ohlcv_intraday(ticker, "minute1", count=25)
+            if len(df_1m) < 21:
+                return None
+            volumes = df_1m["volume"].reset_index(drop=True)
+            vol_sma = float(volumes.rolling(20).mean().iloc[-1])
+            vol_ratio = float(volumes.iloc[-1] / vol_sma) if vol_sma > 0 else 0.0
+            candle_open = float(df_1m["open"].iloc[-1])
+            candle_close = float(df_1m["close"].iloc[-1])
+            candle_high = float(df_1m["high"].iloc[-1])
+            candle_low = float(df_1m["low"].iloc[-1])
+            spike_pct = ((candle_close - candle_open) / candle_open * 100.0) if candle_open > 0 else 0.0
+            candle_range = max(candle_high - candle_low, 1e-9)
+            body_ratio = max(0.0, (candle_close - candle_open) / candle_range)
+            daily_gain = self._compute_day_gain_from_open_pct(ticker)
+            if daily_gain > 18.0:
+                return None
+            return (
+                base * 0.5
+                + min(vol_ratio, 20.0) * 2.0
+                + max(0.0, spike_pct) * 4.0
+                + body_ratio * 6.0
+                - max(0.0, daily_gain - 10.0) * 1.5
+            )
+
+        return base
+
+    def _base_liquidity_score(self, rank_idx: int, total: int) -> float:
+        if total <= 1:
+            return 20.0
+        return 20.0 * (1.0 - (rank_idx / max(total - 1, 1)))
+
+    def _get_last_close(self, ticker: str, interval: str, count: int) -> float:
+        df = self.get_ohlcv_intraday(ticker, interval=interval, count=count)
+        closes = df["close"].dropna()
+        if closes.empty:
+            raise DataFetchError(f"종가 데이터 부족: {ticker}/{interval}")
+        return float(closes.iloc[-1])
+
+    def _compute_intraday_change_pct(self, ticker: str, interval: str, bars: int) -> float:
+        df = self.get_ohlcv_intraday(ticker, interval=interval, count=bars + 1)
+        closes = df["close"].dropna().reset_index(drop=True)
+        if len(closes) < bars + 1:
+            raise DataFetchError(f"변화율 데이터 부족: {ticker}/{interval}")
+        start = float(closes.iloc[-(bars + 1)])
+        end = float(closes.iloc[-1])
+        if start <= 0:
+            return 0.0
+        return (end - start) / start * 100.0
+
+    def _compute_volume_ratio(self, ticker: str, interval: str, period: int = 20) -> float:
+        vol_cur, vol_sma = self.compute_volume_sma_intraday(ticker, period=period, interval=interval)
+        return (vol_cur / vol_sma) if vol_sma > 0 else 0.0
+
+    def _compute_day_range_pct(self, ticker: str) -> float:
+        df = self.get_ohlcv(ticker, count=3)
+        if df is None or len(df) < 2:
+            raise DataFetchError(f"일봉 range 데이터 부족: {ticker}")
+        prev = df.iloc[-2]
+        prev_close = float(prev["close"])
+        if prev_close <= 0:
+            return 0.0
+        return (float(prev["high"]) - float(prev["low"])) / prev_close * 100.0
+
+    def _compute_day_gain_from_open_pct(self, ticker: str) -> float:
+        df = self.get_ohlcv(ticker, count=2)
+        if df is None or df.empty:
+            raise DataFetchError(f"일봉 open 데이터 부족: {ticker}")
+        cur = df.iloc[-1]
+        day_open = float(cur["open"])
+        day_close = float(cur["close"])
+        if day_open <= 0:
+            return 0.0
+        return (day_close - day_open) / day_open * 100.0

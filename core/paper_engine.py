@@ -7,6 +7,7 @@ from __future__ import annotations
 import time
 import logging
 import threading
+from collections import deque
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,7 @@ from data.market_data import MarketData
 from exchange.websocket_manager import PriceCache, WebSocketManager
 from strategies.registry import load_strategy
 from logging_.log_context import clear_log_mode, set_log_mode
+from logging_.signal_trace_logger import append_signal_trace
 
 logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -42,6 +44,7 @@ class PaperScenario:
         self.budget_per_trade = budget_per_trade or config.BUDGET_PER_TRADE
         self.budget_pct = budget_pct                 # None이면 고정액, 값 있으면 잔고의 N%
         self._daily_buy_tracker: dict[str, date] = {}
+        self.last_ticker_refresh_at: float = time.time()
 
     def already_bought_today(self, ticker: str) -> bool:
         return self._daily_buy_tracker.get(ticker) == datetime.now(KST).date()
@@ -78,7 +81,7 @@ class PaperEngine:
         self._thread: threading.Thread | None = None
         self.running        = False
         self._history_guard_cache: dict[tuple, tuple[bool, float, str]] = {}
-        self._last_ticker_refresh: float = time.time()
+        self._recent_signal_traces = deque(maxlen=300)
 
     # ─── 시작 / 종료 ─────────────────────────────────────────────────────────
 
@@ -192,6 +195,87 @@ class PaperEngine:
         prices = self._price_cache.all_prices()
         return [s.account.get_summary(prices) for s in self._scenarios]
 
+    def _record_signal_trace(
+        self,
+        scenario: PaperScenario,
+        ticker: str,
+        price: float,
+        buy_signal,
+    ) -> None:
+        metadata = getattr(buy_signal, "metadata", {}) or {}
+        trace = metadata.get("signal_trace")
+        if not trace:
+            return
+
+        event = {
+            **trace,
+            "account_id": scenario.account.account_id,
+            "strategy_id": scenario.strategy.get_strategy_id(),
+            "scenario_id": scenario.account.scenario_id,
+            "ticker": ticker,
+            "loop_price": float(price),
+            "should_buy": bool(buy_signal.should_buy),
+            "decision_reason": buy_signal.reason,
+        }
+        append_signal_trace(event, is_paper=True)
+        self._recent_signal_traces.append(event)
+
+    def _record_sell_signal_trace(
+        self,
+        scenario: PaperScenario,
+        ticker: str,
+        price: float,
+        sell_signal,
+        position,
+    ) -> None:
+        metadata = getattr(sell_signal, "metadata", {}) or {}
+        trace = metadata.get("signal_trace")
+        if not trace:
+            return
+
+        event = {
+            **trace,
+            "account_id": scenario.account.account_id,
+            "strategy_id": scenario.strategy.get_strategy_id(),
+            "scenario_id": scenario.account.scenario_id,
+            "ticker": ticker,
+            "loop_price": float(price),
+            "should_sell": bool(sell_signal.should_sell),
+            "decision_reason": sell_signal.reason,
+            "position_buy_price": float(getattr(position, "buy_price", 0.0) or 0.0),
+            "position_buy_time": getattr(position, "buy_time", None),
+        }
+        append_signal_trace(event, is_paper=True)
+        self._recent_signal_traces.append(event)
+
+    def _record_engine_signal_trace(
+        self,
+        scenario: PaperScenario,
+        ticker: str,
+        price: float,
+        *,
+        reason: str,
+        values: dict | None = None,
+        trace_type: str = "engine_guard",
+    ) -> None:
+        event = {
+            "trace_version": "1.0",
+            "trace_type": trace_type,
+            "account_id": scenario.account.account_id,
+            "strategy_id": scenario.strategy.get_strategy_id(),
+            "scenario_id": scenario.account.scenario_id,
+            "ticker": ticker,
+            "evaluated_at": datetime.now(KST).isoformat(),
+            "current_price": float(price),
+            "loop_price": float(price),
+            "should_buy": False,
+            "decision_reason": reason,
+            "reason": reason,
+            "values": values or {},
+        }
+        append_signal_trace(event, is_paper=True)
+        self._recent_signal_traces.append(event)
+
     def _build_analysis_diagnostics(self, scenario: PaperScenario) -> dict:
         """가상거래 세션 종료 시 추적용 부가 메타데이터를 만든다."""
         action_counts: dict[str, int] = {}
@@ -208,6 +292,12 @@ class PaperEngine:
                 "current_price": self._price_cache.get(pos.ticker),
             })
 
+        recent_signal_traces = [
+            trace for trace in self._recent_signal_traces
+            if trace.get("scenario_id") == scenario.account.scenario_id
+            and trace.get("account_id") == scenario.account.account_id
+        ][-30:]
+
         return {
             "mode": "paper",
             "account_id": scenario.account.account_id,
@@ -219,6 +309,7 @@ class PaperEngine:
             "trade_action_counts": action_counts,
             "open_position_count": len(open_positions),
             "open_positions": open_positions,
+            "recent_signal_traces": recent_signal_traces,
         }
 
     def get_scenario(self, account_id: str) -> PaperScenario | None:
@@ -237,11 +328,9 @@ class PaperEngine:
                 now_kst = datetime.now(KST)
                 today = now_kst.date()
 
-                # ── 전략별 거래대상 종목 주기 갱신 (기본 1시간) ──────────────────
-                refresh_sec = config.TICKER_REFRESH_HOURS * 3600
-                if refresh_sec > 0 and (time.time() - self._last_ticker_refresh) >= refresh_sec:
+                # ── 전략별 refresh 주기에 따라 거래대상 종목 갱신 ────────────────
+                if self._has_due_scenario_refresh():
                     self._refresh_scenario_tickers()
-                    self._last_ticker_refresh = time.time()
 
                 # ── 09:00 KST 스케줄 매도 (VB 전략 대상, 하루 1회) ──────────────
                 if (
@@ -323,7 +412,27 @@ class PaperEngine:
 
         logger.info("[PaperEngine] 09:00 스케줄 매도 완료")
 
-    def _refresh_scenario_tickers(self) -> None:
+    def _get_scenario_refresh_seconds(self, scenario: PaperScenario) -> float:
+        try:
+            profile = self._market_data.get_ticker_selection_profile(
+                scenario.strategy,
+                max(scenario.ticker_count, 1),
+            )
+            refresh_hours = float(profile.get("refresh_hours", config.TICKER_REFRESH_HOURS))
+        except Exception:
+            refresh_hours = config.TICKER_REFRESH_HOURS
+        return max(refresh_hours * 3600.0, 180.0)
+
+    def _has_due_scenario_refresh(self) -> bool:
+        now = time.time()
+        for scenario in self._scenarios:
+            if scenario.ticker_count <= 0:
+                continue
+            if now - scenario.last_ticker_refresh_at >= self._get_scenario_refresh_seconds(scenario):
+                return True
+        return False
+
+    def _refresh_scenario_tickers(self, force: bool = False) -> None:
         """
         가상거래 시나리오별 종목 갱신.
 
@@ -335,8 +444,34 @@ class PaperEngine:
 
         all_tickers: set[str] = set()
         combined_blacklist = set(config.TICKER_BLACKLIST)
+        now = time.time()
+        due_scenarios: list[PaperScenario] = []
+        for scenario in self._scenarios:
+            if scenario.ticker_count <= 0:
+                continue
+            if force or (now - scenario.last_ticker_refresh_at >= self._get_scenario_refresh_seconds(scenario)):
+                due_scenarios.append(scenario)
+
+        if not due_scenarios and not force:
+            return
+
         try:
-            max_pool = min(max((s.ticker_count for s in self._scenarios), default=10) * 5, 200)
+            max_pool = 50
+            for scenario in due_scenarios:
+                if scenario.ticker_count <= 0:
+                    continue
+                try:
+                    profile = self._market_data.get_ticker_selection_profile(
+                        scenario.strategy,
+                        scenario.ticker_count,
+                    )
+                    max_pool = max(max_pool, int(profile.get("pool_size", 50)))
+                except Exception:
+                    max_pool = max(
+                        max_pool,
+                        min(max(scenario.ticker_count * 5, 50), 200),
+                    )
+            max_pool = min(max_pool, 200)
             base_tickers = [
                 t for t in MarketData.get_top_tickers_by_volume(max_pool)
                 if t not in combined_blacklist
@@ -346,6 +481,12 @@ class PaperEngine:
             return
 
         for scenario in self._scenarios:
+            if scenario.ticker_count <= 0:
+                all_tickers.update(scenario.tickers)
+                continue
+            if scenario not in due_scenarios:
+                all_tickers.update(scenario.tickers)
+                continue
             try:
                 held = list(scenario.account.positions.keys())
                 new_tickers = self._market_data.get_top_tickers_for_strategy(
@@ -365,8 +506,10 @@ class PaperEngine:
                     )
 
                 scenario.tickers = new_tickers
+                scenario.last_ticker_refresh_at = now
                 all_tickers.update(new_tickers)
             except Exception as e:
+                scenario.last_ticker_refresh_at = now
                 logger.warning(
                     f"[{scenario.account.account_id}] 종목 갱신 실패 → 기존 유지: {e}"
                 )
@@ -419,6 +562,7 @@ class PaperEngine:
                 side="LONG",
             )
             sell_signal = strategy.should_sell_on_signal(ticker, price, strat_pos)
+            self._record_sell_signal_trace(scenario, ticker, price, sell_signal, strat_pos)
             if sell_signal.should_sell:
                 indicators = self._get_indicators(ticker, price)
                 trade = account.execute_sell(ticker, price, sell_signal.reason, indicators)
@@ -441,6 +585,7 @@ class PaperEngine:
                 return
 
             buy_signal = strategy.should_buy(ticker, price)
+            self._record_signal_trace(scenario, ticker, price, buy_signal)
             if buy_signal.should_buy:
                 indicators = self._get_indicators(ticker, price)
                 # 전략별 stop_loss_pct 등 메타데이터 병합 (스캘핑 전략의 0.3% SL 등)
@@ -488,6 +633,18 @@ class PaperEngine:
 
         if not ok:
             logger.info(f"[HistoryGuard][{scenario.account.scenario_id}] {reason}")
+            self._record_engine_signal_trace(
+                scenario,
+                ticker,
+                self._price_cache.get(ticker) or 0.0,
+                reason=reason,
+                values={
+                    "guard": "history_requirements",
+                    "requirements": dict(requirements),
+                    "blacklist_size": len(config.TICKER_BLACKLIST),
+                },
+                trace_type="history_guard",
+            )
 
         return ok, reason
 

@@ -1,67 +1,36 @@
 """
-전략: RSI 과매도 평균회귀 (개선판 v5)
-시나리오 ID: mr_rsi
-
-■ 개선 사항 (v5) — 2026-03-11 Gemini 분석 기반
-  - 하드 손절매 추가: 진입가 대비 -7% 즉시 강제 청산 (단일 거래 최대 손실 제한)
-  - RSI_BUY 강화: 35 → 30 (과매도 기준 엄격화, 급락장 무분별 진입 방지)
-  - RSI_BUY_RANGE 강화: 37 → 32 (약한 횡보장 완화 기준도 엄격화)
-  - ADX_RANGE_THR 강화: 20 → 15 (추세장/횡보장 경계 더 엄격하게 구분)
-
-■ 개선 사항 (v4) — 2026-03-10
-  - 쿨다운 4시간: 매도 후 동일 종목 4시간 재진입 금지
-  - 트레일링 스탑: +1.5% 수익 도달 시 peak 추적, peak에서 1.0% 하락 시 매도
-
-■ 개선 사항 (v3) — 2026-03-05 일보 기반
-  - ADX 완화 범위 축소: RSI_BUY_RANGE 40 → 37
-
-■ 개선 사항 (v2)
-  1. EMA200(4h) 추세 필터
-  2. Dynamic entry: ADX 기반 RSI 완화
-  3. Scale-out: RSI 회복 OR 시간 만료
-
-매수 조건:
-  1. 현재가 >= EMA(200, 4h)
-  2. RSI(14, 1h) <= RSI_BUY (동적: ADX 기반 30 or 32)
-  3. 쿨다운 종료 (매도 후 4시간 경과)
-
-매도 조건:
-  0. 하드 손절: pnl <= -7%                   (v5 신규 최우선)
-  1. 트레일링 스탑: peak >= +1.5% -> -1.0%
-  2. RSI >= RSI_SELL(65)
-  3. 24h 초과 보유
-
-임포트 규칙:
-  이 파일은 base_strategy, data.market_data 만 임포트.
+Strategy: RSI oversold mean reversion (v5 baseline)
+Scenario ID: mr_rsi
 """
-import time
+
 import logging
-from datetime import datetime, timezone, timedelta
+import time
+from datetime import datetime, timedelta, timezone
+
 from data.market_data import MarketData
 from exchange.upbit_client import DataFetchError
 from strategies.base_strategy import BaseStrategy, BuySignal, SellSignal
 
 logger = logging.getLogger(__name__)
 
-_INTERVAL        = "minute60"
-_HTF_INTERVAL    = "minute240"
-_HTF_EMA_PERIOD  = 200
-_RSI_PERIOD      = 14
-_RSI_BUY         = 30.0         # v5: 35->30
-_RSI_BUY_RANGE   = 32.0         # v5: 37->32
-_RSI_SELL        = 65.0
-_ADX_RANGE_THR   = 15.0         # v5: 20->15
-_MAX_HOLD_HOURS  = 24.0
-_COOLDOWN_HOURS  = 4.0
+_INTERVAL = "minute60"
+_HTF_INTERVAL = "minute240"
+_HTF_EMA_PERIOD = 200
+_RSI_PERIOD = 14
+_RSI_BUY = 30.0
+_RSI_BUY_RANGE = 32.0
+_RSI_SELL = 65.0
+_ADX_RANGE_THR = 15.0
+_MAX_HOLD_HOURS = 24.0
+_COOLDOWN_HOURS = 4.0
 _TRAIL_TRIGGER_PCT = 1.5
-_TRAIL_DROP_PCT    = 1.0
-_HARD_SL_PCT       = 7.0        # v5: 신규 — 진입가 대비 -7% 즉시 청산
+_TRAIL_DROP_PCT = 1.0
+_HARD_SL_PCT = 7.0
 
 _KST = timezone(timedelta(hours=9))
 
 
 class RSIStrategy(BaseStrategy):
-
     def __init__(self, market_data: MarketData) -> None:
         self._md = market_data
         self._cooldowns: dict[str, float] = {}
@@ -82,13 +51,19 @@ class RSIStrategy(BaseStrategy):
             _HTF_INTERVAL: 195,
         }
 
+    def get_ticker_selection_profile(self) -> dict:
+        return {
+            "pattern": "mean_reversion_rsi",
+            "pool_size": 70,
+            "refresh_hours": 1.0,
+        }
+
     def on_position_closed(self, ticker: str, reason: str = "") -> None:
         self._peaks.pop(ticker, None)
-        cd_end = time.time() + _COOLDOWN_HOURS * 3600
-        self._cooldowns[ticker] = cd_end
+        self._cooldowns[ticker] = time.time() + _COOLDOWN_HOURS * 3600
         logger.info(
-            f"[mr_rsi] 쿨다운 등록 | {ticker} | "
-            f"{_COOLDOWN_HOURS}h 재진입 금지 | reason={reason}"
+            f"[mr_rsi] cooldown set | {ticker} | "
+            f"{_COOLDOWN_HOURS}h lock | reason={reason}"
         )
 
     def on_position_reentered(
@@ -97,12 +72,92 @@ class RSIStrategy(BaseStrategy):
         new_entry_price: float,
         reason: str = "",
     ) -> None:
-        # Re-entry ???곗쟾 peak瑜?湲곗??쇰줈 ?뱀쭠?섎㈃ ?몃젅?쇰쭅 ?좏샇媛 諛섎났 ?깮?꽦???덉쓣 ???덈떎.
+        # Reset the tracked peak to the new synthetic entry so trailing logic
+        # does not reuse an old peak from the prior position lifecycle.
         self._peaks[ticker] = new_entry_price
         logger.info(
-            f"[mr_rsi] ?ъ쭊???뺣낫 珥덇린??| {ticker} | "
+            f"[mr_rsi] re-entry context reset | {ticker} | "
             f"entry={new_entry_price:,.0f} | reason={reason}"
         )
+
+    def _build_signal_trace(
+        self,
+        ticker: str,
+        current_price: float,
+        *,
+        should_buy: bool,
+        reason: str,
+        values: dict | None = None,
+        include_market_context: bool = True,
+        include_rsi_series: bool = False,
+    ) -> dict:
+        trace = {
+            "trace_version": "1.0",
+            "trace_type": "buy_evaluation",
+            "strategy_id": self.get_strategy_id(),
+            "scenario_id": self.get_scenario_id(),
+            "ticker": ticker,
+            "evaluated_at": datetime.now(_KST).isoformat(),
+            "current_price": float(current_price),
+            "should_buy": bool(should_buy),
+            "reason": reason,
+            "values": values or {},
+        }
+        if include_rsi_series:
+            try:
+                rsi_series = self._md.compute_rsi_series_intraday(
+                    ticker, _RSI_PERIOD, _INTERVAL, n=3
+                )
+                trace["rsi_series_1h"] = [round(value, 4) for value in rsi_series]
+            except Exception as exc:
+                trace["rsi_series_error"] = str(exc)
+        if include_market_context:
+            try:
+                trace["market_data_context"] = self._md.build_signal_debug_context(
+                    ticker,
+                    [_INTERVAL, _HTF_INTERVAL],
+                )
+            except Exception as exc:
+                trace["market_data_context_error"] = str(exc)
+        return trace
+
+    def _build_sell_signal_trace(
+        self,
+        ticker: str,
+        current_price: float,
+        position,
+        *,
+        should_sell: bool,
+        reason: str,
+        values: dict | None = None,
+        include_market_context: bool = False,
+    ) -> dict:
+        entry = float(getattr(position, "buy_price", 0.0) or 0.0)
+        peak = float(self._peaks.get(ticker, current_price) or current_price)
+        trace = {
+            "trace_version": "1.0",
+            "trace_type": "sell_evaluation",
+            "strategy_id": self.get_strategy_id(),
+            "scenario_id": self.get_scenario_id(),
+            "ticker": ticker,
+            "evaluated_at": datetime.now(_KST).isoformat(),
+            "current_price": float(current_price),
+            "entry_price": entry,
+            "tracked_peak_price": peak,
+            "should_sell": bool(should_sell),
+            "reason": reason,
+            "values": values or {},
+            "buy_time": getattr(position, "buy_time", None),
+        }
+        if include_market_context:
+            try:
+                trace["market_data_context"] = self._md.build_signal_debug_context(
+                    ticker,
+                    [_INTERVAL],
+                )
+            except Exception as exc:
+                trace["market_data_context_error"] = str(exc)
+        return trace
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
         cd_end = self._cooldowns.get(ticker, 0.0)
@@ -110,51 +165,104 @@ class RSIStrategy(BaseStrategy):
             now = time.time()
             if now < cd_end:
                 remaining_min = (cd_end - now) / 60
+                meta = {
+                    "signal_trace": self._build_signal_trace(
+                        ticker,
+                        current_price,
+                        should_buy=False,
+                        reason=f"COOLDOWN({remaining_min:.0f}min)",
+                        values={"cooldown_remaining_min": round(remaining_min, 2)},
+                        include_market_context=False,
+                    )
+                }
                 return BuySignal(
-                    ticker=ticker, should_buy=False,
+                    ticker=ticker,
+                    should_buy=False,
                     current_price=current_price,
                     reason=f"COOLDOWN({remaining_min:.0f}min)",
+                    metadata=meta,
                 )
-            else:
-                del self._cooldowns[ticker]
+            del self._cooldowns[ticker]
 
         try:
-            rsi        = self._md.compute_rsi_intraday(ticker, _RSI_PERIOD, _INTERVAL)
-            adx        = self._md.compute_adx(ticker, 14, _INTERVAL)
-            ema200_4h  = self._md.compute_ema_intraday(ticker, _HTF_EMA_PERIOD, _HTF_INTERVAL)
-        except DataFetchError as e:
-            logger.warning(f"[mr_rsi] 데이터 조회 실패: {ticker}: {e}")
-            return BuySignal(ticker, False, current_price, "DATA_ERROR")
+            rsi = self._md.compute_rsi_intraday(ticker, _RSI_PERIOD, _INTERVAL)
+            adx = self._md.compute_adx(ticker, 14, _INTERVAL)
+            ema200_4h = self._md.compute_ema_intraday(
+                ticker, _HTF_EMA_PERIOD, _HTF_INTERVAL
+            )
+        except DataFetchError as exc:
+            logger.warning(f"[mr_rsi] data fetch failed: {ticker}: {exc}")
+            meta = {
+                "signal_trace": self._build_signal_trace(
+                    ticker,
+                    current_price,
+                    should_buy=False,
+                    reason="DATA_ERROR",
+                    values={"error": str(exc)},
+                )
+            }
+            return BuySignal(
+                ticker=ticker,
+                should_buy=False,
+                current_price=current_price,
+                reason="DATA_ERROR",
+                metadata=meta,
+            )
 
         meta = {
-            "rsi_1h":      round(rsi, 2),
-            "adx":         round(adx, 1),
-            "ema200_4h":   round(ema200_4h, 0),
-            "tp_label":    "RSI 회복",
+            "rsi_1h": round(rsi, 2),
+            "adx": round(adx, 1),
+            "ema200_4h": round(ema200_4h, 0),
+            "tp_label": "RSI recovery",
         }
 
         if current_price < ema200_4h:
             reason = f"BELOW_EMA200_4H({current_price:.0f}<{ema200_4h:.0f})"
-            logger.debug(f"[mr_rsi] {ticker} EMA200(4h) 하락 추세 제외 | {reason}")
+            meta["signal_trace"] = self._build_signal_trace(
+                ticker,
+                current_price,
+                should_buy=False,
+                reason=reason,
+                values={
+                    "rsi_1h": round(rsi, 4),
+                    "adx_1h": round(adx, 4),
+                    "ema200_4h": round(ema200_4h, 4),
+                },
+            )
+            logger.debug(f"[mr_rsi] {ticker} filtered by 4h EMA200 | {reason}")
             return BuySignal(ticker, False, current_price, reason, metadata=meta)
 
         is_weak_range = adx < _ADX_RANGE_THR
-        rsi_buy       = _RSI_BUY_RANGE if is_weak_range else _RSI_BUY
+        rsi_buy = _RSI_BUY_RANGE if is_weak_range else _RSI_BUY
         meta["rsi_buy_thr"] = rsi_buy
 
-        should = rsi <= rsi_buy
-        reason = "RSI_OVERSOLD" if should else f"RSI_NORMAL({rsi:.1f})"
+        should_buy = rsi <= rsi_buy
+        reason = "RSI_OVERSOLD" if should_buy else f"RSI_NORMAL({rsi:.1f})"
+        meta["signal_trace"] = self._build_signal_trace(
+            ticker,
+            current_price,
+            should_buy=should_buy,
+            reason=reason,
+            values={
+                "rsi_1h": round(rsi, 4),
+                "rsi_buy_threshold": float(rsi_buy),
+                "is_weak_range": is_weak_range,
+                "adx_1h": round(adx, 4),
+                "ema200_4h": round(ema200_4h, 4),
+            },
+            include_rsi_series=True,
+        )
 
-        log_fn = logger.info if should else logger.debug
+        log_fn = logger.info if should_buy else logger.debug
         log_fn(
             f"[mr_rsi] {ticker} | RSI(1h)={rsi:.1f} "
-            f"기준={rsi_buy}({'완화' if is_weak_range else '기본'}) "
+            f"threshold={rsi_buy} ({'range' if is_weak_range else 'base'}) "
             f"ADX={adx:.1f} EMA200_4h={ema200_4h:.0f} -> {reason}"
         )
 
         return BuySignal(
             ticker=ticker,
-            should_buy=should,
+            should_buy=should_buy,
             current_price=current_price,
             reason=reason,
             metadata=meta,
@@ -164,16 +272,33 @@ class RSIStrategy(BaseStrategy):
         entry = position.buy_price
         pnl_pct = (current_price - entry) / entry * 100
 
-        # [v5] 하드 손절매 — 최우선
         if pnl_pct <= -_HARD_SL_PCT:
             reason = f"HARD_SL(pnl={pnl_pct:+.2f}%<=-{_HARD_SL_PCT}%)"
             logger.info(
-                f"[mr_rsi] ★ 하드손절 | {ticker} | "
+                f"[mr_rsi] hard stop | {ticker} | "
                 f"entry={entry:,.0f} now={current_price:,.0f} | {reason}"
             )
-            return SellSignal(ticker, True, current_price, reason)
+            return SellSignal(
+                ticker,
+                True,
+                current_price,
+                reason,
+                metadata={
+                    "signal_trace": self._build_sell_signal_trace(
+                        ticker,
+                        current_price,
+                        position,
+                        should_sell=True,
+                        reason=reason,
+                        values={
+                            "pnl_pct": round(pnl_pct, 4),
+                            "hard_sl_pct": float(_HARD_SL_PCT),
+                        },
+                        include_market_context=True,
+                    )
+                },
+            )
 
-        # 트레일링 스탑
         peak = self._peaks.get(ticker, current_price)
         if current_price > peak:
             peak = current_price
@@ -189,27 +314,83 @@ class RSIStrategy(BaseStrategy):
                     f"|pnl={pnl_pct:+.2f}%)"
                 )
                 logger.info(
-                    f"[mr_rsi] ★ 트레일링 청산 | {ticker} | "
+                    f"[mr_rsi] trailing exit | {ticker} | "
                     f"entry={entry:,.0f} peak={peak:,.0f} now={current_price:,.0f} | {reason}"
                 )
-                return SellSignal(ticker, True, current_price, reason)
+                return SellSignal(
+                    ticker,
+                    True,
+                    current_price,
+                    reason,
+                    metadata={
+                        "signal_trace": self._build_sell_signal_trace(
+                            ticker,
+                            current_price,
+                            position,
+                            should_sell=True,
+                            reason=reason,
+                            values={
+                                "pnl_pct": round(pnl_pct, 4),
+                                "peak_price": round(peak, 8),
+                                "peak_pnl_pct": round(peak_pnl_pct, 4),
+                                "drop_from_peak_pct": round(drop_from_peak, 4),
+                                "trail_trigger_pct": float(_TRAIL_TRIGGER_PCT),
+                                "trail_drop_pct": float(_TRAIL_DROP_PCT),
+                            },
+                            include_market_context=True,
+                        )
+                    },
+                )
 
-        # RSI 과매수 회복
         try:
             rsi = self._md.compute_rsi_intraday(ticker, _RSI_PERIOD, _INTERVAL)
-        except DataFetchError as e:
-            logger.warning(f"[mr_rsi] 매도 RSI 조회 실패: {ticker}: {e}")
-            return SellSignal(ticker, False, current_price, "")
+        except DataFetchError as exc:
+            logger.warning(f"[mr_rsi] sell RSI fetch failed: {ticker}: {exc}")
+            return SellSignal(
+                ticker,
+                False,
+                current_price,
+                "",
+                metadata={
+                    "signal_trace": self._build_sell_signal_trace(
+                        ticker,
+                        current_price,
+                        position,
+                        should_sell=False,
+                        reason="SELL_DATA_ERROR",
+                        values={"error": str(exc)},
+                    )
+                },
+            )
 
         if rsi >= _RSI_SELL:
             reason = f"RSI_RECOVERED({rsi:.1f})"
             logger.info(
-                f"[mr_rsi] ★ 매도(RSI회복) | {ticker} | "
-                f"RSI(1h)={rsi:.1f} >= {_RSI_SELL} | 수익={pnl_pct:+.2f}%"
+                f"[mr_rsi] exit on RSI recovery | {ticker} | "
+                f"RSI(1h)={rsi:.1f} >= {_RSI_SELL} | pnl={pnl_pct:+.2f}%"
             )
-            return SellSignal(ticker, True, current_price, reason)
+            return SellSignal(
+                ticker,
+                True,
+                current_price,
+                reason,
+                metadata={
+                    "signal_trace": self._build_sell_signal_trace(
+                        ticker,
+                        current_price,
+                        position,
+                        should_sell=True,
+                        reason=reason,
+                        values={
+                            "pnl_pct": round(pnl_pct, 4),
+                            "rsi_1h": round(rsi, 4),
+                            "rsi_sell_threshold": float(_RSI_SELL),
+                        },
+                        include_market_context=True,
+                    )
+                },
+            )
 
-        # 최대 보유 시간 초과
         try:
             buy_time = position.buy_time
             if isinstance(buy_time, str):
@@ -219,9 +400,29 @@ class RSIStrategy(BaseStrategy):
             elapsed_hours = (datetime.now(_KST) - buy_time).total_seconds() / 3600
             if elapsed_hours >= _MAX_HOLD_HOURS:
                 reason = f"MAX_HOLD_EXPIRED({elapsed_hours:.0f}h|pnl={pnl_pct:+.2f}%)"
-                logger.info(f"[mr_rsi] ★ 매도(시간만료) | {ticker} | {reason}")
-                return SellSignal(ticker, True, current_price, reason)
-        except Exception as e:
-            logger.debug(f"[mr_rsi] 시간 계산 오류: {e}")
+                logger.info(f"[mr_rsi] exit on max hold | {ticker} | {reason}")
+                return SellSignal(
+                    ticker,
+                    True,
+                    current_price,
+                    reason,
+                    metadata={
+                        "signal_trace": self._build_sell_signal_trace(
+                            ticker,
+                            current_price,
+                            position,
+                            should_sell=True,
+                            reason=reason,
+                            values={
+                                "pnl_pct": round(pnl_pct, 4),
+                                "elapsed_hours": round(elapsed_hours, 4),
+                                "max_hold_hours": float(_MAX_HOLD_HOURS),
+                            },
+                            include_market_context=True,
+                        )
+                    },
+                )
+        except Exception as exc:
+            logger.debug(f"[mr_rsi] max-hold calculation error: {exc}")
 
         return SellSignal(ticker, False, current_price, "")

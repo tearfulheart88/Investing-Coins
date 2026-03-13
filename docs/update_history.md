@@ -58,3 +58,29 @@
 - 분석 로그 폴더 분리만 되돌리려면 `config.py`, `session_log_writer.py`를 이전 구조로 복원하면 됩니다.
 - 실거래 시나리오별 저장을 되돌리려면 `trader.py`의 세션 종료 저장부를 단일 `save_session_log(...)` 호출로 되돌리면 됩니다.
 - 진단 메타데이터만 빼고 싶다면 `diagnostics` 생성 및 저장 인자를 제거하면 됩니다.
+
+## 2026-03-12 Batch 03 - 실거래 완료 매도 누적 성과 Markdown 리포트 추가
+
+### 목적
+- 실제거래에서 완전히 종료된 매도 내역만 따로 누적해서 실현 손익을 바로 확인하기 위함
+- 외부 동기화 포지션과 봇 순수 거래 성과를 분리해서 보기 위함
+- 재시작 후에도 Markdown 파일 하나로 실거래 누적 성과를 읽을 수 있게 하기 위함
+
+### 변경 내용
+- `logs/real/realized_performance.md` 경로 추가
+- `TradeLogger` 초기화 시 기존 SQLite 거래 이력으로 실현 성과 Markdown 리포트 자동 재생성
+- 완료된 실거래 SELL 체결이 들어올 때마다 실현 손익 리포트 자동 갱신
+- 멀티시나리오 실거래 세션 ID 라벨을 `real_multi_...`로 바꿔 실제 전략명 오해를 줄임
+- 리포트에 아래 항목 추가
+  - 전체 완료 매도 성과
+  - 봇 순수 완료 매도 성과 (`exchange_sync`, `unknown` 제외)
+  - 최근 완료 매도 내역 표
+
+### 변경 파일
+- [config.py](/C:/Users/user/Desktop/AI/GoogleDrive/Claude/Investing-Coins/config.py)
+- [logging_/trade_logger.py](/C:/Users/user/Desktop/AI/GoogleDrive/Claude/Investing-Coins/logging_/trade_logger.py)
+- [core/trader.py](/C:/Users/user/Desktop/AI/GoogleDrive/Claude/Investing-Coins/core/trader.py)
+
+### 롤백 힌트
+- 자동 생성 리포트를 제거하려면 `trade_logger.py`에서 `_update_realized_performance_report()` 호출과 관련 헬퍼 메서드를 제거하면 됩니다.
+- 파일 경로만 제거하려면 `config.py`의 `REAL_PERFORMANCE_MD_PATH` 정의를 삭제하면 됩니다.

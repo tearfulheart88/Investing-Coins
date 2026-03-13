@@ -69,6 +69,7 @@ class Signal:
             should_act=ss.should_sell,
             current_price=ss.current_price,
             reason=ss.reason,
+            metadata=ss.metadata,
         )
 
 
@@ -90,6 +91,7 @@ class SellSignal:
     should_sell: bool
     current_price: float
     reason: str                           # "STRATEGY_EXIT" / "" (해당 없음)
+    metadata: dict = field(default_factory=dict)
 
 
 class BaseStrategy(ABC):
@@ -176,5 +178,20 @@ class BaseStrategy(ABC):
 
         신규 상장/재상장 종목의 반복 DATA_ERROR 로그를 줄이기 위한
         사전 가드로 사용된다.
+        """
+        return {}
+
+    def get_ticker_selection_profile(self) -> dict:
+        """
+        전략별 종목 선별 힌트.
+
+        예시:
+          {
+              "pattern": "mean_reversion_rsi",
+              "pool_size": 80,
+          }
+
+        반환값은 data.market_data 의 전략별 종목 선별기에서 사용된다.
+        기본 구현은 빈 dict 이며, 이 경우 시나리오 ID 기반 기본 프로필을 사용한다.
         """
         return {}

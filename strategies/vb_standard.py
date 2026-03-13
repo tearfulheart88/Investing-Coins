@@ -70,6 +70,13 @@ class VBStandardStrategy(BaseStrategy):
             "minute5": _VOL_SMA_PERIOD + 1,
         }
 
+    def get_ticker_selection_profile(self) -> dict:
+        return {
+            "pattern": "vol_breakout_basic",
+            "pool_size": 80,
+            "refresh_hours": 0.5,
+        }
+
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:
         try:
             k_raw            = self._md.compute_noise_filter_k(ticker, days=_NOISE_FILTER_DAYS)

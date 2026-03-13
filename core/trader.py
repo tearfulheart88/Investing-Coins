@@ -1,6 +1,7 @@
 import time
 import threading
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -22,6 +23,7 @@ from core.order_state_machine import OrderStateMachine, OrderState
 from logging_.trade_logger import TradeLogger, TradeRecord, now_kst
 from logging_.session_manager import SessionManager
 from logging_.log_context import clear_log_mode, set_log_mode
+from logging_.signal_trace_logger import append_signal_trace
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ class RealScenario:
     weight_pct: float = 100.0          # 전체 자금 중 이 시나리오 비중 (%)
     budget_pct: float = 30.0           # 시나리오 자금 중 1회 거래 비중 (%)
     daily_buy_tracker: dict = field(default_factory=dict)
+    last_ticker_refresh_at: float = 0.0
 
 
 class Trader:
@@ -75,13 +78,11 @@ class Trader:
                     ticker_count=s.get("ticker_count", len(initial_tickers)),
                     weight_pct=s.get("weight_pct", 100.0),
                     budget_pct=s.get("budget_pct", config.BUDGET_PER_TRADE_PCT),
+                    last_ticker_refresh_at=time.time(),
                 )
                 self._scenarios.append(rs)
                 all_tickers.update(rs.tickers)
             self._active_tickers: list[str] = list(all_tickers)
-            # 멀티시나리오: 주기적 거래량 상위 갱신용 타임스탬프
-            # (time.time()으로 초기화 → 최초 갱신은 TICKER_REFRESH_HOURS 후 발생)
-            self._last_ticker_refresh: float = time.time()
             self._multi_scenario_mode: bool = True
         else:
             # 단일전략 호환 모드 (기존 config 기반)
@@ -96,9 +97,9 @@ class Trader:
                 ticker_count=config.TOP_TICKERS_COUNT,
                 weight_pct=100.0,
                 budget_pct=config.BUDGET_PER_TRADE_PCT,
+                last_ticker_refresh_at=time.time(),
             )]
             self._active_tickers = list(config.TICKERS)
-            self._last_ticker_refresh: float = 0.0
             self._multi_scenario_mode: bool = False
 
         # 첫 시나리오 strategy를 self.strategy로 유지 (scheduler 등 하위호환)
@@ -130,8 +131,8 @@ class Trader:
         self.ws   = WebSocketManager(self._active_tickers, self.price_cache, log_mode="real")
         self.risk = RiskManager(self.client, self.state, self.price_cache)
         self.trade_logger    = TradeLogger()
-        first_scenario_id = self._scenarios[0].scenario_id
-        self.session_manager = SessionManager(first_scenario_id)
+        session_label = "real_multi" if self._multi_scenario_mode else self._scenarios[0].scenario_id
+        self.session_manager = SessionManager(session_label)
         self.scheduler       = TradingScheduler(self, self.market_data, self.trade_logger)
         self.obsidian_logger = None   # ObsidianLogger 주입 가능 (ui.py에서 설정)
 
@@ -187,6 +188,7 @@ class Trader:
         # Obsidian 일보용 세션 거래 누적
         self._obs_session_trades: list = []   # PaperTrade 객체 리스트
         self._session_start_equity: float = 0.0
+        self._recent_signal_traces = deque(maxlen=300)
 
         # 에러 카운터 (연속 오류 감지)
         self._error_count = 0
@@ -284,8 +286,7 @@ class Trader:
                     )
                 self._update_active_tickers(new_tickers)
             elif self._multi_scenario_mode:
-                self._refresh_scenario_tickers()
-            self._last_ticker_refresh = time.time()
+                self._refresh_scenario_tickers(force=True)
             logger.info("[Trader] 수동 종목 새로고침 완료")
         finally:
             clear_log_mode()
@@ -560,12 +561,9 @@ class Trader:
                 except Exception as e:
                     logger.warning(f"동적 종목 갱신 오류 (이전 종목 유지): {e}")
             elif self._multi_scenario_mode:
-                # 멀티시나리오 모드(UI 실행): 주기적으로 거래량 상위 종목 직접 갱신
-                now = time.time()
-                refresh_sec = config.TICKER_REFRESH_HOURS * 3600
-                if now - self._last_ticker_refresh >= refresh_sec:
+                # 멀티시나리오 모드(UI 실행): 전략별 refresh 주기에 따라 종목군 갱신
+                if self._has_due_scenario_refresh():
                     self._refresh_scenario_tickers()
-                    self._last_ticker_refresh = now
 
             # ── 거래소 포지션 주기 동기화 (외부 매수 / 응답 유실 포지션 복구) ────
             # 실제 잔고를 주기적으로 조회해 외부 매수/매도까지 반영
@@ -663,6 +661,7 @@ class Trader:
 
                 # 1. 전략 고유 매도 신호
                 sell_signal = scenario.strategy.should_sell_on_signal(ticker, price, position)
+                self._record_sell_signal_trace(scenario, ticker, price, sell_signal, position)
                 if sell_signal.should_sell:
                     # ── 재진입(Re-entry) 체크 ──────────────────────────────
                     if self._should_reentry(sell_signal, position, price, scenario):
@@ -690,6 +689,7 @@ class Trader:
                     return
 
                 buy_signal = scenario.strategy.should_buy(ticker, price)
+                self._record_signal_trace(scenario, ticker, price, buy_signal)
                 self.trade_logger.log_signal(buy_signal)
 
                 # ── 런타임 블랙리스트 자동 등록 (데이터 오류 반복 종목) ────────
@@ -747,12 +747,44 @@ class Trader:
 
         if not ok:
             logger.info(f"[HistoryGuard][{scenario.scenario_id}] {reason}")
+            self._record_engine_signal_trace(
+                scenario,
+                ticker,
+                self.price_cache.get(ticker) or 0.0,
+                reason=reason,
+                values={
+                    "guard": "history_requirements",
+                    "requirements": dict(requirements),
+                    "blacklist_size": len(config.TICKER_BLACKLIST) + len(self._runtime_blacklist),
+                },
+                trace_type="history_guard",
+            )
 
         return ok, reason
 
     # ─── 멀티시나리오 종목 주기 갱신 ────────────────────────────────────────
 
-    def _refresh_scenario_tickers(self) -> None:
+    def _get_scenario_refresh_seconds(self, scenario: RealScenario) -> float:
+        try:
+            profile = self.market_data.get_ticker_selection_profile(
+                scenario.strategy,
+                max(scenario.ticker_count, 1),
+            )
+            refresh_hours = float(profile.get("refresh_hours", config.TICKER_REFRESH_HOURS))
+        except Exception:
+            refresh_hours = config.TICKER_REFRESH_HOURS
+        return max(refresh_hours * 3600.0, 180.0)
+
+    def _has_due_scenario_refresh(self) -> bool:
+        now = time.time()
+        for scenario in self._scenarios:
+            if scenario.ticker_count <= 0:
+                continue
+            if now - scenario.last_ticker_refresh_at >= self._get_scenario_refresh_seconds(scenario):
+                return True
+        return False
+
+    def _refresh_scenario_tickers(self, force: bool = False) -> None:
         """
         멀티시나리오 모드 전용: 거래량 상위 종목을 시나리오별로 재선정.
 
@@ -767,7 +799,33 @@ class Trader:
             logger.info("[Trader] 멀티시나리오 거래량 상위 종목 갱신 시작...")
             all_tickers: set[str] = set()
             combined_blacklist = set(config.TICKER_BLACKLIST) | self._runtime_blacklist
-            max_pool = min(max((s.ticker_count for s in self._scenarios), default=10) * 5, 200)
+            now = time.time()
+            due_scenarios: list[RealScenario] = []
+            for scenario in self._scenarios:
+                if scenario.ticker_count <= 0:
+                    continue
+                if force or (now - scenario.last_ticker_refresh_at >= self._get_scenario_refresh_seconds(scenario)):
+                    due_scenarios.append(scenario)
+
+            if not due_scenarios and not force:
+                return
+
+            max_pool = 50
+            for scenario in due_scenarios:
+                if scenario.ticker_count <= 0:
+                    continue
+                try:
+                    profile = self.market_data.get_ticker_selection_profile(
+                        scenario.strategy,
+                        scenario.ticker_count,
+                    )
+                    max_pool = max(max_pool, int(profile.get("pool_size", 50)))
+                except Exception:
+                    max_pool = max(
+                        max_pool,
+                        min(max(scenario.ticker_count * 5, 50), 200),
+                    )
+            max_pool = min(max_pool, 200)
             base_tickers = [
                 t for t in MarketData.get_top_tickers_by_volume(max_pool)
                 if t not in combined_blacklist
@@ -776,6 +834,9 @@ class Trader:
             for scenario in self._scenarios:
                 n = scenario.ticker_count
                 if n <= 0:
+                    all_tickers.update(scenario.tickers)
+                    continue
+                if scenario not in due_scenarios:
                     all_tickers.update(scenario.tickers)
                     continue
                 try:
@@ -806,8 +867,10 @@ class Trader:
                         logger.debug(f"[{scenario.scenario_id}] 종목 변동 없음 ({n}개)")
 
                     scenario.tickers = new_tickers
+                    scenario.last_ticker_refresh_at = now
                     all_tickers.update(new_tickers)
                 except Exception as e:
+                    scenario.last_ticker_refresh_at = now
                     logger.warning(f"[{scenario.scenario_id}] 종목 갱신 실패 → 기존 유지: {e}")
                     all_tickers.update(scenario.tickers)
 
@@ -1077,11 +1140,23 @@ class Trader:
         # 상태머신: 매수 체결 확인
         self.order_sm.confirm_entry(ticker, order.volume, order.avg_price)
 
+        entry_metadata = dict(signal.metadata or {})
+        entry_metadata.update({
+            "buy_price": round(order.avg_price, 8),
+            "buy_time": now_kst(),
+            "buy_krw_spent": round(buy_amount, 2),
+            "applied_stop_loss_price": round(stop_loss_price, 8),
+            "applied_stop_loss_pct": round(
+                (stop_loss_price / order.avg_price - 1.0) if order.avg_price > 0 else 0.0,
+                6,
+            ),
+        })
+
         position = Position(
             ticker=ticker,
             volume=order.volume,
             buy_price=order.avg_price,
-            buy_time=now_kst(),
+            buy_time=entry_metadata["buy_time"],
             krw_spent=buy_amount,
             order_uuid=order.uuid,
             stop_loss_price=stop_loss_price,
@@ -1090,7 +1165,7 @@ class Trader:
             take_profit_price=target_price,
             take_profit_label=target_label,
             locked_profit_price=order.avg_price,
-            entry_metadata=dict(signal.metadata or {}),
+            entry_metadata=entry_metadata,
         )
 
         self.state.add_position(position)
@@ -1106,7 +1181,7 @@ class Trader:
             _obs_buy = _PT(
                 trade_no=len(self._obs_session_trades) + 1,
                 timestamp=position.buy_time,
-                account_id="REAL", scenario_id=self.strategy.get_scenario_id(),
+                account_id="REAL", scenario_id=scenario.scenario_id,
                 ticker=ticker, action="BUY",
                 price=order.avg_price, volume=order.volume,
                 amount_krw=buy_amount, fee=order.paid_fee,
@@ -1116,7 +1191,7 @@ class Trader:
             self._obs_session_trades.append(_obs_buy)
             if self.obsidian_logger:
                 self.obsidian_logger.log_trade(
-                    self.strategy.get_scenario_id(), _obs_buy, is_paper=False
+                    scenario.scenario_id, _obs_buy, is_paper=False
                 )
         except Exception:
             pass
@@ -1232,6 +1307,26 @@ class Trader:
         sell_gross  = sell_price * order.volume
         sell_fee    = order.paid_fee if order.paid_fee > 0 else sell_gross * config.FEE_RATE
         net_proceeds = sell_gross - sell_fee
+        entry_metadata = (
+            dict(position.entry_metadata)
+            if isinstance(position.entry_metadata, dict)
+            else {}
+        )
+        sell_metadata = dict(entry_metadata)
+        sell_metadata.update({
+            "buy_price": round(float(position.buy_price or 0.0), 8),
+            "buy_time": getattr(position, "buy_time", None),
+            "buy_krw_spent": round(float(position.krw_spent or 0.0), 2),
+            "sell_reason": reason,
+            "sell_time": now_kst(),
+            "sell_requested_price": round(price, 8),
+            "sell_avg_price": round(sell_price, 8),
+            "sell_state": order.state,
+            "sell_volume": round(order.volume, 8),
+            "locked_profit_price": round(
+                float(getattr(position, "locked_profit_price", 0.0) or 0.0), 8
+            ),
+        })
 
         if position.side == "SHORT":
             # SHORT: 매도(진입) 시 받은 금액 - 매수(청산) 시 지불 금액
@@ -1240,6 +1335,8 @@ class Trader:
             # LONG: 매도 수령금 - 매수 투자금
             pnl_krw = net_proceeds - position.krw_spent
         pnl_pct = pnl_krw / position.krw_spent if position.krw_spent > 0 else 0
+        sell_metadata["realized_pnl_krw"] = round(pnl_krw, 2)
+        sell_metadata["realized_pnl_pct"] = round(pnl_pct, 6)
 
         # 매도 성공 → 포지션 제거 + 상태머신 청산 완료
         self.order_sm.confirm_exit(position.ticker)
@@ -1281,24 +1378,39 @@ class Trader:
         except Exception:
             pass
 
-        self.trade_logger.log_trade(TradeRecord(
-            ticker=position.ticker,
-            action="SELL",
-            price=sell_price,
-            volume=order.volume,
-            strategy_id=position.strategy_id,
-            scenario_id=position.scenario_id,
-            reason=reason,
-            order_uuid=order.uuid,
-            krw_amount=round(net_proceeds, 0),
-            fee=round(sell_fee, 2),
-            pnl_krw=round(pnl_krw, 2),
-            pnl_pct=round(pnl_pct, 6),
-            total_equity=equity,
-            error=error_msg,
-        ))
+        try:
+            self.trade_logger.log_trade(TradeRecord(
+                ticker=position.ticker,
+                action="SELL",
+                price=sell_price,
+                volume=order.volume,
+                strategy_id=position.strategy_id,
+                scenario_id=position.scenario_id,
+                reason=reason,
+                order_uuid=order.uuid,
+                krw_amount=round(net_proceeds, 0),
+                fee=round(sell_fee, 2),
+                pnl_krw=round(pnl_krw, 2),
+                pnl_pct=round(pnl_pct, 6),
+                total_equity=equity,
+                metadata=sell_metadata,
+                error=error_msg,
+            ))
+        except Exception as exc:
+            logger.exception(
+                f"[SELL_LOG_FAIL] {position.scenario_id} {position.ticker} "
+                f"sell record persist failed: {exc}"
+            )
 
     # ─── Obsidian 일보용 요약 빌더 ──────────────────────────────────────────
+
+    def get_session_summary(self) -> dict:
+        """UI에서 현재 실거래 세션 요약을 안전하게 조회한다."""
+        try:
+            equity = self.risk.get_total_equity()
+        except Exception:
+            equity = self._session_start_equity
+        return self._build_obs_summary(equity)
 
     def _build_obs_summary(self, equity: float) -> dict:
         """
@@ -1321,6 +1433,7 @@ class Trader:
             "total_trades":    len(self._obs_session_trades),
             "sell_count":      len(sells),
             "win_rate":        len(wins) / len(sells) * 100 if sells else 0.0,
+            "open_positions":  len(self.state.all_positions()),
         }
 
     def _build_analysis_summary(self, scenario_id: str, equity: float) -> dict:
@@ -1354,6 +1467,87 @@ class Trader:
             "open_positions": len(open_positions),
         }
 
+    def _record_signal_trace(
+        self,
+        scenario: RealScenario,
+        ticker: str,
+        price: float,
+        buy_signal,
+    ) -> None:
+        metadata = getattr(buy_signal, "metadata", {}) or {}
+        trace = metadata.get("signal_trace")
+        if not trace:
+            return
+
+        event = {
+            **trace,
+            "session_id": self.session_manager.session_id,
+            "strategy_id": scenario.strategy_id,
+            "scenario_id": scenario.scenario_id,
+            "ticker": ticker,
+            "loop_price": float(price),
+            "should_buy": bool(buy_signal.should_buy),
+            "decision_reason": buy_signal.reason,
+        }
+        append_signal_trace(event, is_paper=False)
+        self._recent_signal_traces.append(event)
+
+    def _record_sell_signal_trace(
+        self,
+        scenario: RealScenario,
+        ticker: str,
+        price: float,
+        sell_signal,
+        position,
+    ) -> None:
+        metadata = getattr(sell_signal, "metadata", {}) or {}
+        trace = metadata.get("signal_trace")
+        if not trace:
+            return
+
+        event = {
+            **trace,
+            "session_id": self.session_manager.session_id,
+            "strategy_id": scenario.strategy_id,
+            "scenario_id": scenario.scenario_id,
+            "ticker": ticker,
+            "loop_price": float(price),
+            "should_sell": bool(sell_signal.should_sell),
+            "decision_reason": sell_signal.reason,
+            "position_buy_price": float(getattr(position, "buy_price", 0.0) or 0.0),
+            "position_buy_time": getattr(position, "buy_time", None),
+        }
+        append_signal_trace(event, is_paper=False)
+        self._recent_signal_traces.append(event)
+
+    def _record_engine_signal_trace(
+        self,
+        scenario: RealScenario,
+        ticker: str,
+        price: float,
+        *,
+        reason: str,
+        values: dict | None = None,
+        trace_type: str = "engine_guard",
+    ) -> None:
+        event = {
+            "trace_version": "1.0",
+            "trace_type": trace_type,
+            "session_id": self.session_manager.session_id,
+            "strategy_id": scenario.strategy_id,
+            "scenario_id": scenario.scenario_id,
+            "ticker": ticker,
+            "evaluated_at": datetime.now(KST).isoformat(),
+            "current_price": float(price),
+            "loop_price": float(price),
+            "should_buy": False,
+            "decision_reason": reason,
+            "reason": reason,
+            "values": values or {},
+        }
+        append_signal_trace(event, is_paper=False)
+        self._recent_signal_traces.append(event)
+
     def _build_analysis_diagnostics(self, scenario: RealScenario) -> dict:
         """원인 추적용 부가 메타데이터를 남긴다."""
         action_counts: dict[str, int] = {}
@@ -1385,6 +1579,11 @@ class Trader:
                 "is_external_sync": is_external_sync,
             })
 
+        recent_signal_traces = [
+            trace for trace in self._recent_signal_traces
+            if trace.get("scenario_id") == scenario.scenario_id
+        ][-30:]
+
         return {
             "session_id": self.session_manager.session_id,
             "mode": "real",
@@ -1400,6 +1599,7 @@ class Trader:
             "open_position_count": len(open_positions),
             "external_sync_position_count": external_sync_count,
             "open_positions": open_positions,
+            "recent_signal_traces": recent_signal_traces,
         }
 
     # ─── 스케줄러 호출: 전체 매도 ────────────────────────────────────────────

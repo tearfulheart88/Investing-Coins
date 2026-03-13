@@ -147,6 +147,13 @@ class VBNoiseFilterStrategy(BaseStrategy):
             req["minute240"] = 195
         return req
 
+    def get_ticker_selection_profile(self) -> dict:
+        return {
+            "pattern": "vol_breakout_filtered",
+            "pool_size": 80,
+            "refresh_hours": 0.5,
+        }
+
     # ─── 포지션 종료 시 내부 상태 정리 (스케줄매도/외부 매도 공통) ────────────
     def on_position_closed(self, ticker: str, reason: str = "") -> None:
         """

@@ -7,14 +7,20 @@ import os, sys, queue, logging, threading, uuid, webbrowser
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, scrolledtext, messagebox, filedialog
+from dotenv import set_key
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from logging_.system_logger import setup_logging
 from logging_.log_context import InjectTradeModeFilter, clear_log_mode, set_log_mode
+from logging_.trade_db import TradeDB
 from core.session_timer import SessionTimer, DURATION_OPTIONS
 from core.notification_manager import NotificationManager
+from core.telegram_notifier import (
+    detect_chat_id_for_token,
+    send_real_stop_summary_notification_async,
+)
 from logging_.obsidian_logger import ObsidianLogger
 
 
@@ -140,8 +146,10 @@ class TradingApp(tk.Tk):
         self._notif_mgr: NotificationManager | None  = None
         self._obsidian: ObsidianLogger | None        = None
         self._trader_thread: threading.Thread | None = None
+        self._paper_thread: threading.Thread | None = None
         self._real_running  = False
         self._paper_running = False
+        self._paper_starting = False
         self._real_scenario_rows: list[RealScenarioRow] = []
         self._paper_rows: list[PaperAccountRow] = []
         self._trade_log_wins: dict[str, tk.Toplevel] = {}  # 거래 로그 팝업 창 관리
@@ -151,11 +159,15 @@ class TradingApp(tk.Tk):
         self._reentry_vars: dict[str, tk.BooleanVar] = {}  # 전략별 재진입 토글
         self._real_refreshing = False
         self._real_pos_syncing = False
+        self._trade_db: TradeDB | None = None
+        self._last_real_stop_summary: dict | None = None
+        self._last_real_stop_realized: dict | None = None
 
         # 로그 큐
         self._log_queue: queue.Queue = queue.Queue(maxsize=2000)
 
         self._setup_logging()
+        self._init_trade_db()
         self._apply_style()
         self._build_ui()
         self._poll_logs()
@@ -175,6 +187,13 @@ class TradingApp(tk.Tk):
         ))
         h.setLevel(logging.INFO)
         logging.getLogger().addHandler(h)
+
+    def _init_trade_db(self) -> None:
+        try:
+            self._trade_db = TradeDB()
+        except Exception as exc:
+            self._trade_db = None
+            logging.getLogger(__name__).warning(f"TradeDB 초기화 실패: {exc}")
 
     def _init_fonts(self) -> None:
         families = set(tkfont.families(self))
@@ -286,6 +305,202 @@ class TradingApp(tk.Tk):
         if value is None or value <= 0:
             return "—"
         return f"{value:.8f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _format_signed_krw(value: float | None) -> str:
+        if value is None:
+            return "—"
+        return f"{value:+,.0f}원"
+
+    @staticmethod
+    def _format_signed_pct(value: float | None) -> str:
+        if value is None:
+            return "—"
+        return f"{value:+.3f}%"
+
+    def _query_completed_real_sells(
+        self,
+        *,
+        limit: int | None = 8,
+        session_id: str | None = None,
+    ) -> list[dict]:
+        if not self._trade_db:
+            return []
+
+        where = [
+            "action = 'SELL'",
+            "pnl_krw IS NOT NULL",
+            "(order_uuid IS NULL OR order_uuid <> 'FAILED')",
+            "COALESCE(strategy_id, '') NOT IN ('exchange_sync', 'unknown')",
+        ]
+        params: list = []
+        if session_id:
+            where.append("session_id = ?")
+            params.append(session_id)
+
+        sql = f"""
+            SELECT
+                timestamp,
+                ticker,
+                scenario_id,
+                strategy_id,
+                reason,
+                price,
+                volume,
+                fee,
+                pnl_krw,
+                pnl_pct
+            FROM trades
+            WHERE {' AND '.join(where)}
+            ORDER BY timestamp DESC
+        """
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        return self._trade_db.query(sql, tuple(params))
+
+    def _query_completed_real_sell_summary(self, session_id: str | None = None) -> dict:
+        if not self._trade_db:
+            return {
+                "sell_count": 0,
+                "win_count": 0,
+                "win_rate_pct": 0.0,
+                "total_pnl_krw": 0.0,
+                "weighted_return_pct": 0.0,
+            }
+
+        where = [
+            "action = 'SELL'",
+            "pnl_krw IS NOT NULL",
+            "(order_uuid IS NULL OR order_uuid <> 'FAILED')",
+            "COALESCE(strategy_id, '') NOT IN ('exchange_sync', 'unknown')",
+        ]
+        params: list = []
+        if session_id:
+            where.append("session_id = ?")
+            params.append(session_id)
+
+        sql = f"""
+            SELECT
+                COUNT(*) AS sell_count,
+                SUM(CASE WHEN pnl_krw > 0 THEN 1 ELSE 0 END) AS win_count,
+                COALESCE(SUM(pnl_krw), 0) AS total_pnl_krw,
+                COALESCE(
+                    SUM(((price * volume) - COALESCE(fee, 0)) - pnl_krw),
+                    0
+                ) AS total_cost
+            FROM trades
+            WHERE {' AND '.join(where)}
+        """
+        rows = self._trade_db.query(sql, tuple(params))
+        if not rows:
+            return {
+                "sell_count": 0,
+                "win_count": 0,
+                "win_rate_pct": 0.0,
+                "total_pnl_krw": 0.0,
+                "weighted_return_pct": 0.0,
+            }
+
+        row = rows[0]
+        sell_count = int(row.get("sell_count") or 0)
+        win_count = int(row.get("win_count") or 0)
+        total_pnl = float(row.get("total_pnl_krw") or 0.0)
+        total_cost = float(row.get("total_cost") or 0.0)
+        return {
+            "sell_count": sell_count,
+            "win_count": win_count,
+            "win_rate_pct": (win_count / sell_count * 100.0) if sell_count else 0.0,
+            "total_pnl_krw": total_pnl,
+            "weighted_return_pct": (total_pnl / total_cost * 100.0) if total_cost > 0 else 0.0,
+        }
+
+    def _summarize_completed_real_sells(self, rows: list[dict]) -> dict:
+        total_pnl = 0.0
+        total_cost = 0.0
+        win_count = 0
+
+        for row in rows:
+            pnl_krw = float(row.get("pnl_krw") or 0.0)
+            price = float(row.get("price") or 0.0)
+            volume = float(row.get("volume") or 0.0)
+            fee = float(row.get("fee") or 0.0)
+
+            total_pnl += pnl_krw
+            if pnl_krw > 0:
+                win_count += 1
+
+            estimated_cost = (price * volume) - fee - pnl_krw
+            if estimated_cost > 0:
+                total_cost += estimated_cost
+
+        sell_count = len(rows)
+        return {
+            "sell_count": sell_count,
+            "win_count": win_count,
+            "win_rate_pct": (win_count / sell_count * 100.0) if sell_count else 0.0,
+            "total_pnl_krw": total_pnl,
+            "weighted_return_pct": (total_pnl / total_cost * 100.0) if total_cost > 0 else 0.0,
+        }
+
+    def _build_realized_summary_text(
+        self,
+        cumulative: dict,
+        session_realized: dict | None = None,
+    ) -> str:
+        parts = [
+            (
+                f"누적 실현손익 {self._format_signed_krw(cumulative['total_pnl_krw'])} "
+                f"({self._format_signed_pct(cumulative['weighted_return_pct'])})"
+            ),
+            f"완료 매도 {cumulative['sell_count']}건",
+            f"승률 {cumulative['win_rate_pct']:.1f}%",
+        ]
+        if session_realized and session_realized.get("sell_count", 0) > 0:
+            parts.append(
+                "이번 세션 "
+                f"{self._format_signed_krw(session_realized['total_pnl_krw'])} "
+                f"({self._format_signed_pct(session_realized['weighted_return_pct'])})"
+            )
+        return " | ".join(parts)
+
+    def _refresh_realized_trades_panel(self) -> None:
+        if not hasattr(self, "_realized_trade_tree"):
+            return
+        if not self._trade_db:
+            self._realized_summary_var.set("실현손익 DB를 사용할 수 없습니다.")
+            for row in self._realized_trade_tree.get_children():
+                self._realized_trade_tree.delete(row)
+            return
+
+        recent_rows = self._query_completed_real_sells(limit=8)
+        cumulative_summary = self._query_completed_real_sell_summary()
+
+        session_summary = None
+        if self._trader and self._real_running:
+            session_id = self._trader.session_manager.session_id
+            if session_id:
+                session_summary = self._query_completed_real_sell_summary(session_id=session_id)
+
+        self._realized_summary_var.set(
+            self._build_realized_summary_text(cumulative_summary, session_summary)
+        )
+
+        for row in self._realized_trade_tree.get_children():
+            self._realized_trade_tree.delete(row)
+
+        for row in recent_rows:
+            pnl_krw = float(row.get("pnl_krw") or 0.0)
+            pnl_pct = float(row.get("pnl_pct") or 0.0) * 100.0
+            tag = "profit" if pnl_krw >= 0 else "loss"
+            self._realized_trade_tree.insert("", "end", tags=(tag,), values=(
+                row.get("timestamp", ""),
+                row.get("scenario_id") or "—",
+                row.get("ticker", ""),
+                row.get("reason") or "—",
+                self._format_signed_krw(pnl_krw),
+                self._format_signed_pct(pnl_pct),
+            ))
 
     def _get_target_display(self, pos) -> str:
         price = float(getattr(pos, "take_profit_price", 0.0) or 0.0)
@@ -1452,6 +1667,96 @@ class TradingApp(tk.Tk):
                   bg=C.BG3, fg=C.FG, relief="flat", bd=2, pady=4,
                   command=self._send_summary_now).pack(fill="x", padx=12, pady=4)
 
+        sep(); hdr("▶  Telegram 알림")
+        self._telegram_enabled_var = tk.BooleanVar(value=config.TELEGRAM_ENABLED)
+        self._telegram_sell_notify_var = tk.BooleanVar(value=config.TELEGRAM_NOTIFY_REAL_SELLS)
+        self._telegram_stop_notify_var = tk.BooleanVar(value=config.TELEGRAM_NOTIFY_REAL_STOP_SUMMARY)
+        self._telegram_token_var = tk.StringVar(value=config.TELEGRAM_BOT_TOKEN or "")
+        self._telegram_chat_id_var = tk.StringVar(value=config.TELEGRAM_CHAT_ID or "")
+
+        tk.Checkbutton(
+            parent,
+            text="텔레그램 알림 활성화",
+            variable=self._telegram_enabled_var,
+            font=("Arial", 9),
+            fg=C.FG,
+            bg=C.BG2,
+            selectcolor=C.BG3,
+            activebackground=C.BG2,
+            activeforeground=C.FG,
+        ).pack(anchor="w", padx=12, pady=(2, 0))
+
+        tf = tk.Frame(parent, bg=C.BG2); tf.pack(fill="x", padx=12, pady=(4, 2))
+        tk.Label(tf, text="Bot Token:", font=("Arial", 8), fg=C.FG, bg=C.BG2,
+                 width=9, anchor="w").pack(side="left")
+        tk.Entry(
+            tf,
+            textvariable=self._telegram_token_var,
+            font=("Consolas", 8),
+            bg=C.BG3,
+            fg=C.FG,
+            insertbackground=C.FG,
+            show="*",
+            relief="flat",
+            bd=4,
+        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        cf = tk.Frame(parent, bg=C.BG2); cf.pack(fill="x", padx=12, pady=(2, 2))
+        tk.Label(cf, text="Chat ID:", font=("Arial", 8), fg=C.FG, bg=C.BG2,
+                 width=9, anchor="w").pack(side="left")
+        tk.Entry(
+            cf,
+            textvariable=self._telegram_chat_id_var,
+            font=("Consolas", 8),
+            bg=C.BG3,
+            fg=C.FG,
+            insertbackground=C.FG,
+            relief="flat",
+            bd=4,
+        ).pack(side="left", fill="x", expand=True, padx=(4, 4))
+        tk.Button(
+            cf,
+            text="최근 대화 찾기",
+            font=("Arial", 8),
+            bg=C.BG3,
+            fg=C.FG,
+            relief="flat",
+            bd=2,
+            command=self._detect_telegram_chat_id,
+        ).pack(side="left")
+
+        tk.Checkbutton(
+            parent,
+            text="실제 매도 완료 때마다 텔레그램 전송",
+            variable=self._telegram_sell_notify_var,
+            font=("Arial", 9),
+            fg=C.FG,
+            bg=C.BG2,
+            selectcolor=C.BG3,
+            activebackground=C.BG2,
+            activeforeground=C.FG,
+        ).pack(anchor="w", padx=12, pady=(2, 0))
+        tk.Checkbutton(
+            parent,
+            text="실제거래 정지 요약 텔레그램 전송",
+            variable=self._telegram_stop_notify_var,
+            font=("Arial", 9),
+            fg=C.FG,
+            bg=C.BG2,
+            selectcolor=C.BG3,
+            activebackground=C.BG2,
+            activeforeground=C.FG,
+        ).pack(anchor="w", padx=12, pady=(2, 4))
+        tk.Label(
+            parent,
+            text="※ bot token은 .env.local에 저장되고 GitHub 업로드 대상에서 제외됩니다.\n"
+                 "   chat id가 비어 있으면 최근 대화에서 자동 탐색을 시도합니다.",
+            font=("Arial", 7),
+            fg=C.SUB,
+            bg=C.BG2,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 4))
+
         sep(); hdr("▶  Gemini AI 전략 분석")
         gf = tk.Frame(parent, bg=C.BG2); gf.pack(fill="x", padx=12, pady=(4, 2))
         tk.Label(gf, text="API Key:", font=("Arial", 8), fg=C.FG, bg=C.BG2,
@@ -1479,6 +1784,72 @@ class TradingApp(tk.Tk):
         tk.Label(parent, text="※ plyer 설치 시 Windows 알림 지원\n   pip install plyer",
                  font=("Arial", 8), fg=C.SUB, bg=C.BG2,
                  justify="left").pack(anchor="w", padx=12, pady=6)
+
+    def _save_local_env_settings(self, updates: dict[str, str]) -> None:
+        local_env_path = config.LOCAL_ENV_PATH
+        if not os.path.exists(local_env_path):
+            with open(local_env_path, "a", encoding="utf-8"):
+                pass
+
+        for key, value in updates.items():
+            set_key(local_env_path, key, str(value), quote_mode="auto")
+
+    def _apply_telegram_settings_from_ui(self) -> bool:
+        enabled = bool(getattr(self, "_telegram_enabled_var", tk.BooleanVar(value=False)).get())
+        token = getattr(self, "_telegram_token_var", tk.StringVar()).get().strip()
+        chat_id = getattr(self, "_telegram_chat_id_var", tk.StringVar()).get().strip()
+        notify_sells = bool(getattr(self, "_telegram_sell_notify_var", tk.BooleanVar(value=True)).get())
+        notify_stop = bool(getattr(self, "_telegram_stop_notify_var", tk.BooleanVar(value=True)).get())
+
+        if enabled and not token:
+            messagebox.showwarning("경고", "텔레그램 알림을 쓰려면 Bot Token을 입력하세요.")
+            return False
+
+        config.TELEGRAM_ENABLED = enabled
+        config.TELEGRAM_BOT_TOKEN = token
+        config.TELEGRAM_CHAT_ID = chat_id
+        config.TELEGRAM_NOTIFY_REAL_SELLS = notify_sells
+        config.TELEGRAM_NOTIFY_REAL_STOP_SUMMARY = notify_stop
+
+        self._save_local_env_settings({
+            "TELEGRAM_ENABLED": "true" if enabled else "false",
+            "TELEGRAM_BOT_TOKEN": token,
+            "TELEGRAM_CHAT_ID": chat_id,
+            "TELEGRAM_NOTIFY_REAL_SELLS": "true" if notify_sells else "false",
+            "TELEGRAM_NOTIFY_REAL_STOP_SUMMARY": "true" if notify_stop else "false",
+        })
+        return True
+
+    def _detect_telegram_chat_id(self) -> None:
+        token = getattr(self, "_telegram_token_var", tk.StringVar()).get().strip()
+        if not token:
+            messagebox.showwarning("텔레그램", "먼저 Bot Token을 입력하세요.")
+            return
+
+        self._save_local_env_settings({
+            "TELEGRAM_ENABLED": "true" if self._telegram_enabled_var.get() else "false",
+            "TELEGRAM_BOT_TOKEN": token,
+            "TELEGRAM_NOTIFY_REAL_SELLS": "true" if self._telegram_sell_notify_var.get() else "false",
+            "TELEGRAM_NOTIFY_REAL_STOP_SUMMARY": "true" if self._telegram_stop_notify_var.get() else "false",
+        })
+
+        try:
+            chat_id = detect_chat_id_for_token(token)
+        except Exception as exc:
+            messagebox.showerror("텔레그램", f"최근 대화 조회 실패: {exc}")
+            return
+
+        if not chat_id:
+            messagebox.showinfo(
+                "텔레그램",
+                "최근 대화에서 chat id를 찾지 못했습니다.\n"
+                "봇에게 먼저 메시지를 한 번 보내고 다시 시도하세요.",
+            )
+            return
+
+        self._telegram_chat_id_var.set(chat_id)
+        self._save_local_env_settings({"TELEGRAM_CHAT_ID": chat_id})
+        messagebox.showinfo("텔레그램", f"chat id를 찾았습니다: {chat_id}")
 
     # ─── 우측 패널 ───────────────────────────────────────────────────────────
 
@@ -1569,6 +1940,34 @@ class TradingApp(tk.Tk):
             bg=C.BG,
         ).pack(anchor="e", padx=8, pady=2)
 
+        realized_head = tk.Frame(pf, bg=C.BG)
+        realized_head.pack(fill="x", padx=6, pady=(6, 0))
+        tk.Label(
+            realized_head,
+            text="최근 완료 실제매도",
+            font=self._ui_font(9, "bold"),
+            fg=C.ACCENT,
+            bg=C.BG,
+        ).pack(side="left")
+        self._realized_summary_var = tk.StringVar(value="실현손익 불러오는 중...")
+        tk.Label(
+            realized_head,
+            textvariable=self._realized_summary_var,
+            font=self._ui_font(8),
+            fg=C.SUB,
+            bg=C.BG,
+        ).pack(side="right")
+
+        self._realized_trade_tree = self._make_tree(pf, [
+            ("closed_at", "완료시각", 150),
+            ("scenario",  "전략", 90),
+            ("ticker",    "종목", 82),
+            ("reason",    "매도사유", 220),
+            ("pnl_krw",   "실현손익", 100),
+            ("pnl_pct",   "수익률", 78),
+        ])
+        self._realized_trade_tree.configure(height=6)
+
         # 가상계좌 현황 탭
         vf = tk.Frame(nb, bg=C.BG); nb.add(vf, text="  가상계좌 현황  ")
         self._paper_tree = self._make_tree(vf, [
@@ -1619,13 +2018,15 @@ class TradingApp(tk.Tk):
             text="실제: 실행 중" if self._real_running else "실제: 정지",
             fg=C.PEACH if self._real_running else C.FG,
         )
-        self._paper_dot.config(fg=C.GREEN if self._paper_running else C.RED)
+        self._paper_dot.config(
+            fg=C.YELLOW if self._paper_starting else (C.GREEN if self._paper_running else C.RED)
+        )
         self._paper_lbl.config(
-            text="가상: 실행 중" if self._paper_running else "가상: 정지",
-            fg=C.ACCENT if self._paper_running else C.FG,
+            text="가상: 준비 중" if self._paper_starting else ("가상: 실행 중" if self._paper_running else "가상: 정지"),
+            fg=C.YELLOW if self._paper_starting else (C.ACCENT if self._paper_running else C.FG),
         )
         # 둘 다 정지 시 자산/타이머 초기화
-        if not self._real_running and not self._paper_running:
+        if not self._real_running and not self._paper_running and not self._paper_starting:
             self._equity_label.config(text="자산: —")
             self._timer_label.config(text="⏱ —")
 
@@ -1656,6 +2057,9 @@ class TradingApp(tk.Tk):
             config.BUDGET_PER_TRADE_PCT = float(first_row.budget_pct_var.get())
         except (ValueError, AttributeError):
             config.BUDGET_PER_TRADE_PCT = config.REAL_DEFAULT_BUDGET_PCT
+
+        if not self._apply_telegram_settings_from_ui():
+            return False
 
         return True
 
@@ -1704,6 +2108,8 @@ class TradingApp(tk.Tk):
 
         self._apply_strategy_params()
         self._init_obsidian_notif()
+        self._last_real_stop_summary = None
+        self._last_real_stop_realized = None
         self._real_running = True
         self._real_start_btn.config(state="disabled")
         self._real_stop_btn.config(state="normal")
@@ -1775,8 +2181,17 @@ class TradingApp(tk.Tk):
             self._real_pos_sync_btn.config(state="disabled", text="↻  거래소 동기화")
 
     def _do_stop_real(self) -> None:
+        stop_summary = None
+        realized_summary = None
+        session_id = None
         if self._trader:
+            session_id = self._trader.session_manager.session_id
             self._trader.stop()
+            stop_summary = self._trader.get_session_summary()
+            if session_id:
+                realized_summary = self._query_completed_real_sell_summary(session_id=session_id)
+        self._last_real_stop_summary = stop_summary
+        self._last_real_stop_realized = realized_summary
         self._real_running = False
         self._cleanup_if_all_stopped()
         self.after(0, self._on_real_stopped)
@@ -1792,11 +2207,34 @@ class TradingApp(tk.Tk):
         if hasattr(self, "_real_pos_sync_btn"):
             self._real_pos_sync_btn.config(state="disabled", text="↻  거래소 동기화")
         self._update_status_dots()
+        self._refresh_realized_trades_panel()
+        if self._last_real_stop_summary:
+            total = self._last_real_stop_summary
+            realized = self._last_real_stop_realized or {
+                "sell_count": 0,
+                "win_rate_pct": 0.0,
+                "total_pnl_krw": 0.0,
+                "weighted_return_pct": 0.0,
+            }
+            message = (
+                "이번 실제거래 종료 요약\n"
+                f"- 세션 총 손익: {self._format_signed_krw(float(total.get('total_pnl', 0.0)))} "
+                f"({self._format_signed_pct(float(total.get('total_pnl_pct', 0.0)))})\n"
+                f"- 세션 실현손익: {self._format_signed_krw(float(realized.get('total_pnl_krw', 0.0)))} "
+                f"({self._format_signed_pct(float(realized.get('weighted_return_pct', 0.0)))})\n"
+                f"- 완료 매도: {int(realized.get('sell_count', 0))}건\n"
+                f"- 세션 승률: {float(realized.get('win_rate_pct', 0.0)):.1f}%\n"
+                f"- 종료 시 보유 포지션: {int(total.get('open_positions', 0))}건"
+            )
+            send_real_stop_summary_notification_async(message)
+            messagebox.showinfo("실제거래 종료", message, parent=self)
+            self._last_real_stop_summary = None
+            self._last_real_stop_realized = None
 
     # ─── 가상거래 시작 / 정지 ────────────────────────────────────────────────
 
     def _on_start_paper_btn(self) -> None:
-        if self._paper_running:
+        if self._paper_running or self._paper_starting:
             return
         if not self._paper_rows:
             messagebox.showwarning("경고", "가상계좌 탭에서 계좌를 추가하세요.")
@@ -1807,12 +2245,13 @@ class TradingApp(tk.Tk):
         config.MAX_DRAWDOWN_PCT = self._drawdown_var.get() / 100
         self._apply_strategy_params()
         self._init_obsidian_notif()
-        self._paper_running = True
+        payload = self._collect_paper_start_payload()
+        self._paper_starting = True
         self._paper_start_btn.config(state="disabled")
-        self._paper_stop_btn.config(state="normal")
+        self._paper_stop_btn.config(state="disabled", text="■  준비 중...")
         self._update_status_dots()
         self._ensure_session_timer()
-        self._start_paper()
+        self._start_paper(payload)
 
     def _on_stop_paper_btn(self) -> None:
         self._paper_stop_btn.config(state="disabled", text="■  정지 중...")
@@ -1826,6 +2265,7 @@ class TradingApp(tk.Tk):
             if hasattr(self, "_paper_ws"):
                 self._paper_ws.stop()
             self._paper_running = False
+            self._paper_starting = False
             self._cleanup_if_all_stopped()
             self.after(0, self._on_paper_stopped)
         finally:
@@ -1833,7 +2273,10 @@ class TradingApp(tk.Tk):
 
     def _on_paper_stopped(self) -> None:
         self._paper_engine = None
+        if hasattr(self, "_paper_ws"):
+            self._paper_ws = None
         self._paper_running = False
+        self._paper_starting = False
         self._paper_start_btn.config(state="normal")
         self._paper_stop_btn.config(state="disabled", text="■  정지")
         self._update_status_dots()
@@ -1949,8 +2392,50 @@ class TradingApp(tk.Tk):
 
     # ─── 가상거래 내부 실행 ──────────────────────────────────────────────────
 
-    def _start_paper(self) -> None:
+    def _collect_paper_start_payload(self) -> list[dict]:
+        payload: list[dict] = []
+        for row in self._paper_rows:
+            try:
+                balance = float(row.balance_var.get().replace(",", ""))
+            except ValueError:
+                balance = float(config.PAPER_DEFAULT_BALANCE)
+
+            try:
+                ticker_count = int(row.ticker_count_var.get())
+            except ValueError:
+                ticker_count = config.PAPER_DEFAULT_TICKER_COUNT
+
+            try:
+                budget_pct = float(row.budget_pct_var.get())
+            except ValueError:
+                budget_pct = config.PAPER_DEFAULT_BUDGET_PCT
+
+            strat_key = row.strategy_var.get()
+            strat_id, scen_id = STRATEGIES.get(
+                strat_key, (config.SELECTED_STRATEGY, config.SELECTED_SCENARIO)
+            )
+            payload.append({
+                "account_id": row.name_var.get() or row.account_id,
+                "strategy_id": strat_id,
+                "scenario_id": scen_id,
+                "balance": balance,
+                "ticker_count": ticker_count,
+                "budget_pct": budget_pct,
+            })
+        return payload
+
+    def _start_paper(self, payload: list[dict]) -> None:
+        self._paper_thread = threading.Thread(
+            target=self._run_paper_engine,
+            args=(payload,),
+            daemon=True,
+            name="PaperStarter",
+        )
+        self._paper_thread.start()
+
+    def _run_paper_engine(self, payload: list[dict]) -> None:
         set_log_mode("paper")
+        ws = None
         try:
             from core.paper_account import PaperAccount
             from core.paper_engine import PaperEngine, PaperScenario
@@ -1964,7 +2449,7 @@ class TradingApp(tk.Tk):
             all_tickers: set[str] = set()
             scenarios: list[PaperScenario] = []
             try:
-                max_n = max(int(r.ticker_count_var.get()) for r in self._paper_rows)
+                max_n = max(int(item["ticker_count"]) for item in payload)
             except ValueError:
                 max_n = config.PAPER_DEFAULT_TICKER_COUNT
             pool_size = min(max(max_n * 5, 50), 200)
@@ -1973,46 +2458,29 @@ class TradingApp(tk.Tk):
                 if t not in set(config.TICKER_BLACKLIST)
             ]
 
-            for row in self._paper_rows:
-                try:
-                    balance = float(row.balance_var.get().replace(",", ""))
-                except ValueError:
-                    balance = float(config.PAPER_DEFAULT_BALANCE)
-
-                try:
-                    ticker_count = int(row.ticker_count_var.get())
-                except ValueError:
-                    ticker_count = config.PAPER_DEFAULT_TICKER_COUNT
-
-                try:
-                    budget_pct = float(row.budget_pct_var.get())
-                except ValueError:
-                    budget_pct = config.PAPER_DEFAULT_BUDGET_PCT
-
-                strat_key = row.strategy_var.get()
-                strat_id, scen_id = STRATEGIES.get(
-                    strat_key, (config.SELECTED_STRATEGY, config.SELECTED_SCENARIO)
-                )
-
-                strategy = load_strategy(market_data, strat_id, scen_id)
+            for item in payload:
+                strategy = load_strategy(market_data, item["strategy_id"], item["scenario_id"])
                 scenario_tickers = market_data.get_top_tickers_for_strategy(
                     strategy,
-                    ticker_count,
+                    item["ticker_count"],
                     blacklist=set(config.TICKER_BLACKLIST),
                     base_tickers=raw_pool,
                 )
                 all_tickers.update(scenario_tickers)
 
                 account = PaperAccount(
-                    account_id=row.name_var.get() or row.account_id,
-                    scenario_id=scen_id,
-                    initial_balance=balance,
+                    account_id=item["account_id"],
+                    scenario_id=item["scenario_id"],
+                    initial_balance=item["balance"],
                 )
                 scenario = PaperScenario(
-                    account, market_data, strat_id, scen_id,
+                    account,
+                    market_data,
+                    item["strategy_id"],
+                    item["scenario_id"],
                     tickers=scenario_tickers,
-                    ticker_count=ticker_count,
-                    budget_pct=budget_pct,
+                    ticker_count=item["ticker_count"],
+                    budget_pct=item["budget_pct"],
                 )
                 scenarios.append(scenario)
 
@@ -2038,8 +2506,36 @@ class TradingApp(tk.Tk):
             logging.getLogger(__name__).info(
                 f"가상거래 시작 | {len(scenarios)}개 계좌 | 전체 종목: {len(all_tickers)}개"
             )
+            self.after(0, self._on_paper_started)
+        except SystemExit:
+            pass
+        except Exception as e:
+            if ws is not None:
+                try:
+                    ws.stop()
+                except Exception:
+                    pass
+            logging.getLogger(__name__).critical(f"가상거래 초기화 오류: {e}", exc_info=True)
+            self.after(0, lambda err=str(e): self._on_paper_start_failed(err))
         finally:
             clear_log_mode()
+
+    def _on_paper_started(self) -> None:
+        self._paper_starting = False
+        self._paper_running = True
+        self._paper_stop_btn.config(state="normal", text="■  정지")
+        self._update_status_dots()
+
+    def _on_paper_start_failed(self, error: str) -> None:
+        self._paper_engine = None
+        if hasattr(self, "_paper_ws"):
+            self._paper_ws = None
+        self._paper_starting = False
+        self._paper_running = False
+        self._paper_start_btn.config(state="normal")
+        self._paper_stop_btn.config(state="disabled", text="■  정지")
+        self._update_status_dots()
+        messagebox.showerror("가상거래 시작 실패", error or "초기화 중 오류가 발생했습니다.", parent=self)
 
     def _get_paper_summaries(self) -> list[dict]:
         if not self._paper_engine:
@@ -2079,6 +2575,7 @@ class TradingApp(tk.Tk):
                 except Exception:
                     pass
 
+        self._refresh_realized_trades_panel()
         self.after(5000, self._poll_status)  # 3→5초: UI 렌더 부하 절감
 
     def _update_real_positions(self, positions: list) -> None:

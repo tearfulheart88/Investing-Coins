@@ -1,7 +1,20 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH: str = os.path.join(BASE_DIR, ".env")
+LOCAL_ENV_PATH: str = os.path.join(BASE_DIR, ".env.local")
+
+load_dotenv(ENV_PATH)
+load_dotenv(LOCAL_ENV_PATH, override=True)
 
 # ─── API 인증 ────────────────────────────────────────────────────────────────
 ACCESS_KEY: str = os.environ.get("UPBIT_ACCESS_KEY", "")
@@ -70,7 +83,6 @@ DATA_RATE_LIMIT_PER_SEC: int = 8        # 시세 API 보수적 제한 (업비트
 WEBSOCKET_STALE_SEC: float = 10.0       # 이 시간 초과 시 REST 폴백
 
 # ─── 경로 ────────────────────────────────────────────────────────────────────
-BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR: str = os.path.join(BASE_DIR, "logs")
 TRADES_JSON_PATH: str = os.path.join(LOGS_DIR, "trades", "trades.json")
 POSITIONS_PATH: str = os.path.join(LOGS_DIR, "state", "positions.json")
@@ -81,6 +93,10 @@ SESSIONS_DIR: str = os.path.join(LOGS_DIR, "sessions")
 ANALYSIS_DIR: str = os.path.join(LOGS_DIR, "analysis")
 ANALYSIS_REAL_DIR: str = os.path.join(ANALYSIS_DIR, "real")
 ANALYSIS_PAPER_DIR: str = os.path.join(ANALYSIS_DIR, "paper")
+SIGNAL_TRACE_DIR: str = os.path.join(LOGS_DIR, "signal_traces")
+SIGNAL_TRACE_REAL_DIR: str = os.path.join(SIGNAL_TRACE_DIR, "real")
+SIGNAL_TRACE_PAPER_DIR: str = os.path.join(SIGNAL_TRACE_DIR, "paper")
+REAL_PERFORMANCE_MD_PATH: str = os.path.join(REAL_LOG_DIR, "realized_performance.md")
 
 # ─── 가상거래 ─────────────────────────────────────────────────────────────────
 PAPER_TRADING: bool = False             # True = 가상거래, False = 실제거래
@@ -126,7 +142,7 @@ PAPER_SCENARIO_DEFAULTS: list[dict] = [
     {"scenario_id": "scalping_triple_ema",   "ticker_count": 5,  "budget_pct": 40.0, "profile": "aggressive"},
     {"scenario_id": "scalping_bb_rsi",       "ticker_count": 5,  "budget_pct": 40.0, "profile": "aggressive"},
     {"scenario_id": "scalping_5ema_reversal","ticker_count": 5,  "budget_pct": 40.0, "profile": "aggressive"},
-    {"scenario_id": "pump_catcher",          "ticker_count": 3,  "budget_pct": 30.0, "profile": "aggressive"},
+    {"scenario_id": "pump_catcher",          "ticker_count": 10, "budget_pct": 30.0, "profile": "aggressive"},
     {"scenario_id": "macd_rsi_trend",        "ticker_count": 10, "budget_pct": 50.0, "profile": "neutral"},
     {"scenario_id": "smrh_stop",             "ticker_count": 10, "budget_pct": 50.0, "profile": "stable"},
 ]
@@ -137,6 +153,13 @@ OBSIDIAN_FOLDER: str = "자동매매"        # 볼트 내 하위 폴더
 
 # ─── 알림 ─────────────────────────────────────────────────────────────────────
 NOTIFICATION_INTERVAL_HOURS: float = 3.0   # 요약 알림 주기 (시간)
+
+# Telegram notifications (local .env.local preferred)
+TELEGRAM_ENABLED: bool = _env_bool("TELEGRAM_ENABLED", False)
+TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_NOTIFY_REAL_SELLS: bool = _env_bool("TELEGRAM_NOTIFY_REAL_SELLS", True)
+TELEGRAM_NOTIFY_REAL_STOP_SUMMARY: bool = _env_bool("TELEGRAM_NOTIFY_REAL_STOP_SUMMARY", True)
 
 # ─── 호가 WebSocket (OrderbookManager) ──────────────────────────────────────
 ORDERBOOK_WS_ENABLED: bool = True           # 호가 WS 활성화 (스프레드 계산용)
@@ -246,7 +269,7 @@ GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 # ─── GitHub 업로드 기능 (로컬 전용) ────────────────────────────────────────
 # .env 에 GITHUB_UPLOAD_ENABLED=true 설정 시에만 UI 버튼 표시
 # 미설정 또는 false → 버튼 숨김 (다른 사람이 클론해도 업로드 불가)
-GITHUB_UPLOAD_ENABLED: bool = os.environ.get("GITHUB_UPLOAD_ENABLED", "false").lower() == "true"
+GITHUB_UPLOAD_ENABLED: bool = _env_bool("GITHUB_UPLOAD_ENABLED", False)
 GEMINI_MAX_TRADES: int = 50              # 분석에 사용할 최근 거래 수
 
 # ─── 수익 재진입 (Re-entry) ───────────────────────────────────────────────────
@@ -265,6 +288,5 @@ REENTRY_ENABLED_SCENARIOS: set = {      # 기본값: 전체 전략 활성화
     "scalping_bb_rsi",
     "scalping_5ema_reversal",
     "macd_rsi_trend",
-    "smrh_stop",
     "pump_catcher",             # 거래량 폭발 펌핑 스캘핑
 }

@@ -64,6 +64,13 @@ class BollingerStrategy(BaseStrategy):
             _HTF_INTERVAL: 195,
         }
 
+    def get_ticker_selection_profile(self) -> dict:
+        return {
+            "pattern": "mean_reversion_band",
+            "pool_size": 70,
+            "refresh_hours": 1.0,
+        }
+
     # ─── 매수 신호 ────────────────────────────────────────────────────────────
 
     def should_buy(self, ticker: str, current_price: float) -> BuySignal:

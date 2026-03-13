@@ -121,6 +121,13 @@ class PumpCatcherStrategy(BaseStrategy):
             "minute1": max(_VOL_SMA_PERIOD + 1, 28),
         }
 
+    def get_ticker_selection_profile(self) -> dict:
+        return {
+            "pattern": "pump_event",
+            "pool_size": 180,
+            "refresh_hours": 0.1667,
+        }
+
     # ─── 포지션 종료 콜백 ─────────────────────────────────────────────────────
 
     def on_position_closed(self, ticker: str, reason: str = "") -> None:
