@@ -630,10 +630,14 @@ class TradingApp(tk.Tk):
         self._build_topbar()
 
         main = tk.Frame(self, bg=C.BG)
-        main.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        main.pack(fill="both", expand=True, padx=10, pady=(4, 10))
 
-        left = tk.Frame(main, bg=C.BG2, width=420)
-        left.pack(side="left", fill="y", padx=(0, 6))
+        # 좌측 패널: 블루틴트 경계선 강조
+        left_wrap = tk.Frame(main, bg=C.BORDER, width=438)
+        left_wrap.pack(side="left", fill="y", padx=(0, 8))
+        left_wrap.pack_propagate(False)
+        left = tk.Frame(left_wrap, bg=C.BG2, width=436)
+        left.pack(side="right", fill="both", expand=True)
         left.pack_propagate(False)
         self._build_left_panel(left)
 
@@ -751,49 +755,57 @@ class TradingApp(tk.Tk):
         # ① 하단 고정 영역을 side="bottom"으로 먼저 pack (역순 → 화면상 정순)
         # ════════════════════════════════════════════════════════════════════
 
-        # 가상거래 버튼 행 (맨 아래)
+        # ── 가상거래 버튼 행 (맨 아래) ──────────────────────────────────────
         bf2 = tk.Frame(parent, bg=C.BG2)
-        bf2.pack(side="bottom", fill="x", padx=12, pady=(2, 12))
-        self._paper_start_btn = tk.Button(
-            bf2, text="▶  가상 시작", font=("Arial", 10, "bold"),
-            bg=C.ACCENT, fg=C.HEADER, relief="flat", bd=0, pady=7,
-            cursor="hand2", command=self._on_start_paper_btn,
+        bf2.pack(side="bottom", fill="x", padx=12, pady=(2, 14))
+        self._paper_start_btn = ModernButton(
+            bf2, text="▶  가상 시작", font=self._ui_font(10, "bold"),
+            bg=C.PURPLE, fg="#ffffff", pady=8,
+            command=self._on_start_paper_btn,
         )
         self._paper_start_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
-        self._paper_stop_btn = tk.Button(
-            bf2, text="■  정지", font=("Arial", 10, "bold"),
-            bg=C.BG3, fg=C.FG, relief="flat", bd=0, pady=7,
-            state="disabled", cursor="hand2", command=self._on_stop_paper_btn,
+        self._paper_stop_btn = ModernButton(
+            bf2, text="■  정지", font=self._ui_font(10, "bold"),
+            bg=C.BG3, fg=C.FG, pady=8,
+            state="disabled", command=self._on_stop_paper_btn,
         )
         self._paper_stop_btn.pack(side="left", fill="x", expand=True, padx=(3, 0))
 
-        tk.Label(parent, text="가상거래", font=("Arial", 8, "bold"),
-                 fg=C.ACCENT, bg=C.BG2).pack(side="bottom", anchor="w", padx=14)
+        # 가상거래 섹션 헤더 (왼쪽 액센트 바)
+        hdr2 = tk.Frame(parent, bg=C.BG2)
+        hdr2.pack(side="bottom", fill="x", padx=12, pady=(6, 2))
+        tk.Frame(hdr2, bg=C.PURPLE, width=3).pack(side="left", fill="y", padx=(0, 7))
+        tk.Label(hdr2, text="가상거래", font=self._ui_font(9, "bold"),
+                 fg=C.PURPLE, bg=C.BG2).pack(side="left")
 
-        # 실제거래 버튼 행
+        # ── 실제거래 버튼 행 ─────────────────────────────────────────────────
         bf1 = tk.Frame(parent, bg=C.BG2)
         bf1.pack(side="bottom", fill="x", padx=12, pady=(2, 5))
-        self._real_start_btn = tk.Button(
+        self._real_start_btn = ModernButton(
             bf1, text="▶  실제 시작", font=self._ui_font(10, "bold"),
-            bg=C.PEACH, fg=C.HEADER, relief="flat", bd=0, pady=7,
-            cursor="hand2", command=self._on_start_real,
+            bg=C.PEACH, fg="#ffffff", pady=8,
+            command=self._on_start_real,
         )
         self._real_start_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
-        self._real_stop_btn = tk.Button(
+        self._real_stop_btn = ModernButton(
             bf1, text="■  정지", font=self._ui_font(10, "bold"),
-            bg=C.BG3, fg=C.FG, relief="flat", bd=0, pady=7,
-            state="disabled", cursor="hand2", command=self._on_stop_real,
+            bg=C.BG3, fg=C.FG, pady=8,
+            state="disabled", command=self._on_stop_real,
         )
         self._real_stop_btn.pack(side="left", fill="x", expand=True, padx=3)
-        self._real_refresh_btn = tk.Button(
+        self._real_refresh_btn = ModernButton(
             bf1, text="↻  종목군 갱신", font=self._ui_font(9, "bold"),
-            bg=C.BG3, fg=C.ACCENT, relief="flat", bd=0, pady=7,
-            state="disabled", cursor="hand2", command=self._on_refresh_real,
+            bg=C.BG3, fg=C.CYAN, pady=8,
+            state="disabled", command=self._on_refresh_real,
         )
         self._real_refresh_btn.pack(side="left", padx=(3, 0))
 
-        tk.Label(parent, text="실제거래", font=("Arial", 8, "bold"),
-                 fg=C.PEACH, bg=C.BG2).pack(side="bottom", anchor="w", padx=14)
+        # 실제거래 섹션 헤더 (왼쪽 액센트 바)
+        hdr1 = tk.Frame(parent, bg=C.BG2)
+        hdr1.pack(side="bottom", fill="x", padx=12, pady=(6, 2))
+        tk.Frame(hdr1, bg=C.PEACH, width=3).pack(side="left", fill="y", padx=(0, 7))
+        tk.Label(hdr1, text="실제거래", font=self._ui_font(9, "bold"),
+                 fg=C.PEACH, bg=C.BG2).pack(side="left")
 
         tk.Frame(parent, bg=C.BG3, height=1).pack(
             side="bottom", fill="x", padx=10, pady=(8, 0))
@@ -843,21 +855,23 @@ class TradingApp(tk.Tk):
         # ════════════════════════════════════════════════════════════════════
 
         # 실제거래 전략 카드 영역
-        tk.Frame(parent, bg=C.BG3, height=1).pack(fill="x", padx=10, pady=(10, 0))
+        tk.Frame(parent, bg=C.BORDER, height=1).pack(fill="x", padx=10, pady=(10, 0))
         sh = tk.Frame(parent, bg=C.BG2)
-        sh.pack(fill="x", padx=12, pady=(4, 2))
-        tk.Label(sh, text="▶  실제 전략 (멀티)", font=("Arial", 9, "bold"),
+        sh.pack(fill="x", padx=12, pady=(6, 2))
+        # 왼쪽 액센트 바
+        tk.Frame(sh, bg=C.PEACH, width=3).pack(side="left", fill="y", padx=(0, 7))
+        tk.Label(sh, text="실제 전략 (멀티)", font=self._ui_font(9, "bold"),
                  fg=C.PEACH, bg=C.BG2).pack(side="left")
-        self._real_weight_info = tk.Label(sh, text="", font=("Arial", 8),
+        self._real_weight_info = tk.Label(sh, text="", font=self._ui_font(8),
                                            fg=C.YELLOW, bg=C.BG2)
         self._real_weight_info.pack(side="left", padx=(6, 0))
-        tk.Button(sh, text="+ 추가", font=("Arial", 8, "bold"),
-                  bg=C.PEACH, fg=C.HEADER, relief="flat", bd=0, padx=6, pady=1,
-                  cursor="hand2", command=self._add_real_scenario
+        ModernButton(sh, text="+ 추가", font=self._ui_font(8, "bold"),
+                  bg=C.PEACH, fg="#ffffff", padx=8, pady=2,
+                  command=self._add_real_scenario
                   ).pack(side="right", padx=(4, 0))
-        tk.Button(sh, text="- 삭제", font=("Arial", 8),
-                  bg=C.BG3, fg=C.FG, relief="flat", bd=0, padx=6, pady=1,
-                  cursor="hand2", command=self._remove_real_scenario
+        ModernButton(sh, text="− 삭제", font=self._ui_font(8),
+                  bg=C.BG3, fg=C.FG, padx=8, pady=2,
+                  command=self._remove_real_scenario
                   ).pack(side="right")
 
         # 예산 정보 행 (헤더 바로 아래, 카드 위)
@@ -902,33 +916,35 @@ class TradingApp(tk.Tk):
 
         # 종목 헤더
         self._ticker_vars: dict[str, tk.BooleanVar] = {}
-        tk.Frame(parent, bg=C.BG3, height=1).pack(fill="x", padx=10, pady=(6, 0))
+        tk.Frame(parent, bg=C.BORDER, height=1).pack(fill="x", padx=10, pady=(8, 0))
 
         th = tk.Frame(parent, bg=C.BG2)
-        th.pack(fill="x", padx=12, pady=(4, 0))
-        tk.Label(th, text="▶  거래 종목", font=("Arial", 9, "bold"),
+        th.pack(fill="x", padx=12, pady=(6, 0))
+        # 왼쪽 액센트 바
+        tk.Frame(th, bg=C.ACCENT, width=3).pack(side="left", fill="y", padx=(0, 7))
+        tk.Label(th, text="거래 종목", font=self._ui_font(9, "bold"),
                  fg=C.ACCENT, bg=C.BG2).pack(side="left")
         self._ticker_status = tk.Label(th, text="로딩 중...",
-                                        font=("Arial", 8), fg=C.YELLOW, bg=C.BG2)
+                                        font=self._ui_font(8), fg=C.YELLOW, bg=C.BG2)
         self._ticker_status.pack(side="left", padx=(6, 0))
-        self._ticker_sel_label = tk.Label(th, text="", font=("Arial", 8),
+        self._ticker_sel_label = tk.Label(th, text="", font=self._ui_font(8),
                                            fg=C.GREEN, bg=C.BG2)
         self._ticker_sel_label.pack(side="left", padx=(4, 0))
-        tk.Button(th, text="↻ 새로고침", font=("Arial", 8),
-                  bg=C.BG3, fg=C.FG, relief="flat", bd=2, padx=6,
-                  cursor="hand2", command=self._refresh_tickers
+        ModernButton(th, text="↻  새로고침", font=self._ui_font(8),
+                  bg=C.BG3, fg=C.CYAN, padx=8, pady=2,
+                  command=self._refresh_tickers
                   ).pack(side="right")
 
         # 일괄 선택/해제 버튼
         tb = tk.Frame(parent, bg=C.BG2)
-        tb.pack(fill="x", padx=12, pady=(2, 2))
-        tk.Button(tb, text="✔ 전체선택", font=("Arial", 8),
-                  bg=C.BG3, fg=C.GREEN, relief="flat", bd=2, padx=8,
-                  cursor="hand2", command=self._select_all_tickers
+        tb.pack(fill="x", padx=12, pady=(3, 2))
+        ModernButton(tb, text="✔  전체선택", font=self._ui_font(8),
+                  bg=C.BG3, fg=C.GREEN, padx=8, pady=2,
+                  command=self._select_all_tickers
                   ).pack(side="left", padx=(0, 4))
-        tk.Button(tb, text="✘ 전체해제", font=("Arial", 8),
-                  bg=C.BG3, fg=C.YELLOW, relief="flat", bd=2, padx=8,
-                  cursor="hand2", command=self._deselect_all_tickers
+        ModernButton(tb, text="✘  전체해제", font=self._ui_font(8),
+                  bg=C.BG3, fg=C.YELLOW, padx=8, pady=2,
+                  command=self._deselect_all_tickers
                   ).pack(side="left")
 
         # ════════════════════════════════════════════════════════════════════
@@ -1151,13 +1167,13 @@ class TradingApp(tk.Tk):
         # ── 하단: 추가/삭제 버튼 ──
         bf = tk.Frame(parent, bg=C.BG2)
         bf.pack(fill="x", padx=8, pady=(0, 6))
-        tk.Button(bf, text="+ 계좌 추가", font=("Arial", 9),
-                  bg=C.ACCENT, fg=C.HEADER, relief="flat", bd=0, padx=8, pady=4,
-                  cursor="hand2", command=self._add_paper_row
+        ModernButton(bf, text="+ 계좌 추가", font=self._ui_font(9),
+                  bg=C.ACCENT, fg="#ffffff", padx=10, pady=5,
+                  command=self._add_paper_row
                   ).pack(side="left", padx=(0, 4))
-        tk.Button(bf, text="− 마지막 삭제", font=("Arial", 9),
-                  bg=C.BG3, fg=C.FG, relief="flat", bd=0, padx=8, pady=4,
-                  cursor="hand2", command=self._remove_paper_row
+        ModernButton(bf, text="− 마지막 삭제", font=self._ui_font(9),
+                  bg=C.BG3, fg=C.FG, padx=10, pady=5,
+                  command=self._remove_paper_row
                   ).pack(side="left")
 
         # 초기 균등 배분
@@ -1265,10 +1281,13 @@ class TradingApp(tk.Tk):
                     lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
 
         # ── 헬퍼: 섹션 헤더 ──
-        def section(txt: str) -> None:
-            tk.Frame(inner, bg=C.BG3, height=1).pack(fill="x", padx=4, pady=(10, 0))
-            tk.Label(inner, text=txt, font=("Arial", 9, "bold"),
-                     fg=C.ACCENT, bg=C.BG2).pack(anchor="w", padx=8, pady=(3, 1))
+        def section(txt: str, color: str = C.ACCENT) -> None:
+            tk.Frame(inner, bg=C.BORDER, height=1).pack(fill="x", padx=4, pady=(10, 2))
+            hrow = tk.Frame(inner, bg=C.BG2)
+            hrow.pack(fill="x", padx=6, pady=(2, 2))
+            tk.Frame(hrow, bg=color, width=3).pack(side="left", fill="y", padx=(0, 7))
+            tk.Label(hrow, text=txt, font=self._ui_font(9, "bold"),
+                     fg=color, bg=C.BG2).pack(side="left", anchor="w")
 
         # ── 헬퍼: 슬라이더 행 ──
         def slider_row(label: str, var: tk.Variable,
@@ -1347,7 +1366,7 @@ class TradingApp(tk.Tk):
         ).pack(side="left", padx=8)
 
         # ── VB 변동성돌파 (공통) ──
-        section("▶  VB 변동성돌파 (공통)")
+        section("VB 변동성돌파 (공통)", C.CYAN)
         vb = {
             "noise_filter_days": tk.IntVar(value=p["vb"]["noise_filter_days"]),
             "ma_period":         tk.IntVar(value=p["vb"]["ma_period"]),
@@ -1398,7 +1417,7 @@ class TradingApp(tk.Tk):
         reentry_row("vb_standard")
 
         # ── mr_rsi ──
-        section("▶  RSI 과매도 (mr_rsi)")
+        section("RSI 과매도 (mr_rsi)", C.GREEN)
         rsi_p = p["mr_rsi"]
         rsi = {
             "rsi_buy":       tk.DoubleVar(value=rsi_p["rsi_buy"]),
@@ -1418,7 +1437,7 @@ class TradingApp(tk.Tk):
         reentry_row("mr_rsi")
 
         # ── mr_bollinger ──
-        section("▶  볼린저+RSI (mr_bollinger)")
+        section("볼린저+RSI (mr_bollinger)", C.GREEN)
         bb_p = p["mr_bollinger"]
         bb = {
             "rsi_buy":       tk.DoubleVar(value=bb_p["rsi_buy"]),
@@ -1440,7 +1459,7 @@ class TradingApp(tk.Tk):
         reentry_row("mr_bollinger")
 
         # ── scalping_triple_ema ──
-        section("▶  삼중EMA 스캘핑 (triple_ema)")
+        section("삼중EMA 스캘핑 (triple_ema)", C.PEACH)
         ema_p = p["scalping_triple_ema"]
         ema = {
             "tp_pct":         tk.DoubleVar(value=ema_p["tp_pct"]),
@@ -1457,7 +1476,7 @@ class TradingApp(tk.Tk):
         self._param_vars["scalping_triple_ema"] = ema
 
         # ── scalping_bb_rsi ──
-        section("▶  BB+RSI 스캘핑 (bb_rsi)")
+        section("BB+RSI 스캘핑 (bb_rsi)", C.PEACH)
         sbb_p = p["scalping_bb_rsi"]
         sbb = {
             "rsi_buy":   tk.DoubleVar(value=sbb_p["rsi_buy"]),
@@ -1471,7 +1490,7 @@ class TradingApp(tk.Tk):
         reentry_row("scalping_bb_rsi")
 
         # ── scalping_5ema_reversal ──
-        section("▶  5EMA 반전 스캘핑 (5ema)")
+        section("5EMA 반전 스캘핑 (5ema)", C.PEACH)
         e5_p = p["scalping_5ema_reversal"]
         e5 = {
             "rr_ratio":          tk.DoubleVar(value=e5_p["rr_ratio"]),
@@ -1491,7 +1510,7 @@ class TradingApp(tk.Tk):
         reentry_row("scalping_5ema_reversal")
 
         # ── macd_rsi_trend ──
-        section("▶  MACD+RSI 추세추종 (macd_rsi_trend)")
+        section("MACD+RSI 추세추종 (macd_rsi_trend)", C.ACCENT)
         mrt_p = p["macd_rsi_trend"]
         mrt = {
             "rsi_entry_min": tk.DoubleVar(value=mrt_p["rsi_entry_min"]),
@@ -1505,7 +1524,7 @@ class TradingApp(tk.Tk):
         reentry_row("macd_rsi_trend")
 
         # ── smrh_stop ──
-        section("▶  SMRH 스탑매매 (smrh_stop)")
+        section("SMRH 스탑매매 (smrh_stop)", C.ACCENT)
         smrh_p = p["smrh_stop"]
         smrh = {
             "rsi_min":     tk.DoubleVar(value=smrh_p["rsi_min"]),
@@ -1517,7 +1536,7 @@ class TradingApp(tk.Tk):
         reentry_row("smrh_stop")
 
         # ── pump_catcher ──
-        section("▶  거래량 폭발 펌핑 (pump_catcher)")
+        section("거래량 폭발 펌핑 (pump_catcher)", C.RED)
         pc_p = p.get("pump_catcher", {})
         pc = {
             "vol_mult":           tk.DoubleVar(value=pc_p.get("vol_mult",             15.0)),
