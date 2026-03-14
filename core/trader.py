@@ -424,6 +424,9 @@ class Trader:
         self._active_tickers = self._filter_active_tickers(self._active_tickers)
         self.ws._tickers = self._active_tickers
 
+        # 새 세션 시작 = Peak 리셋 (이전 세션 고점이 아닌 현재 자산을 새 기준점으로)
+        self.state.reset_peak_equity()
+        self.risk.reset_mdd_notification()
         current_equity = self.risk.get_total_equity()
         self._session_start_equity = current_equity   # Obsidian 일보용 기준 자산
         self.state.update_peak_equity(current_equity)

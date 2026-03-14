@@ -26,6 +26,7 @@ class RiskManager:
         self._client = client
         self._state = state
         self._price_cache = price_cache  # WebSocket PriceCache (optional)
+        self._mdd_notified: bool = False  # MDD 초과 텔레그램 알림 전송 여부 (중복 방지)
 
     # ─── 손절 판단 ────────────────────────────────────────────────────────────
 
@@ -74,9 +75,28 @@ class RiskManager:
                 f"current={current_equity:,.0f}원 "
                 f"drawdown={drawdown*100:.2f}%"
             )
+            # 최초 1회만 텔레그램 알림 (반복 루프에서 중복 발송 방지)
+            if not self._mdd_notified:
+                self._mdd_notified = True
+                try:
+                    from core import telegram_notifier as _tg
+                    _tg.send_message_async(
+                        f"[경고] 최대 낙폭 한도 초과!\n"
+                        f"- Peak: {self._state.peak_equity:,.0f}원\n"
+                        f"- 현재: {current_equity:,.0f}원\n"
+                        f"- 낙폭: {drawdown * 100:.2f}%  (한도: {config.MAX_DRAWDOWN_PCT * 100:.0f}%)\n"
+                        f"- 신규 매수 차단됨\n"
+                        f"- Peak 리셋 후 재개 가능"
+                    )
+                except Exception:
+                    pass
             return True
 
         return False
+
+    def reset_mdd_notification(self) -> None:
+        """MDD 알림 플래그 초기화. Peak 리셋 또는 새 세션 시작 시 호출."""
+        self._mdd_notified = False
 
     def get_total_equity(self) -> float:
         """

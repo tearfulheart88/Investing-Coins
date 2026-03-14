@@ -800,6 +800,22 @@ class TradingApp(tk.Tk):
         )
         self._real_refresh_btn.pack(side="left", padx=(3, 0))
 
+        # ── 실제거래 유틸리티 행 (Peak 리셋) ────────────────────────────────
+        bf1b = tk.Frame(parent, bg=C.BG2)
+        bf1b.pack(side="bottom", fill="x", padx=12, pady=(0, 3))
+        self._peak_reset_btn = ModernButton(
+            bf1b, text="⟳  Peak 리셋",
+            font=self._ui_font(9, "bold"),
+            bg=C.BG3, fg=C.YELLOW, pady=5,
+            command=self._on_reset_peak,
+        )
+        self._peak_reset_btn.pack(side="left", padx=(0, 4))
+        self._peak_status_lbl = tk.Label(
+            bf1b, text="Peak: —", font=self._ui_font(8),
+            fg=C.SUB, bg=C.BG2,
+        )
+        self._peak_status_lbl.pack(side="left")
+
         # 실제거래 섹션 헤더 (왼쪽 액센트 바)
         hdr1 = tk.Frame(parent, bg=C.BG2)
         hdr1.pack(side="bottom", fill="x", padx=12, pady=(6, 2))
@@ -2314,6 +2330,51 @@ class TradingApp(tk.Tk):
         self._cleanup_if_all_stopped()
         self.after(0, self._on_real_stopped)
 
+    def _on_reset_peak(self) -> None:
+        """Peak equity 수동 리셋 — 낙폭 기준점을 현재 자산으로 재설정."""
+        if self._real_running and self._trader:
+            # 실거래 실행 중: trader 객체를 통해 직접 리셋
+            self._trader.state.reset_peak_equity()
+            self._trader.risk.reset_mdd_notification()
+            equity = self._trader.risk.get_total_equity()
+            self._trader.state.update_peak_equity(equity)
+            self._trader.state.save()
+            self._update_peak_status_label(equity, 0.0)
+            messagebox.showinfo(
+                "Peak 리셋",
+                f"낙폭 기준점이 현재 자산({equity:,.0f}원)으로 재설정되었습니다.\n"
+                f"신규 매수가 재개됩니다.",
+            )
+        else:
+            # 실거래 미실행: positions.json 직접 수정
+            try:
+                from data.state_manager import StateManager
+                state = StateManager(config.POSITIONS_PATH)
+                state.load()
+                state.reset_peak_equity()
+                state.save()
+                self._update_peak_status_label(0.0, 0.0)
+                messagebox.showinfo(
+                    "Peak 리셋",
+                    "낙폭 기준점이 초기화되었습니다.\n"
+                    "다음 실거래 시작 시 현재 자산으로 자동 재설정됩니다.",
+                )
+            except Exception as e:
+                messagebox.showerror("오류", f"Peak 리셋 실패: {e}")
+
+    def _update_peak_status_label(self, peak: float, drawdown_pct: float) -> None:
+        """Peak 상태 레이블 갱신. peak=0이면 '—' 표시."""
+        if not hasattr(self, "_peak_status_lbl"):
+            return
+        if peak <= 0:
+            self._peak_status_lbl.config(text="Peak: —", fg=C.SUB)
+        else:
+            color = C.RED if drawdown_pct >= config.MAX_DRAWDOWN_PCT * 100 else C.SUB
+            self._peak_status_lbl.config(
+                text=f"Peak: {peak:,.0f}원  낙폭: {drawdown_pct:.1f}%",
+                fg=color,
+            )
+
     def _on_real_stopped(self) -> None:
         self._trader = None
         self._real_running = False
@@ -2679,6 +2740,13 @@ class TradingApp(tk.Tk):
                         text=f"실제자산: {equity:,.0f}원  |  주문가능: {krw:,.0f}원"
                     )
                     self._update_real_positions(self._trader.state.all_positions())
+                    # Peak 상태 레이블 갱신
+                    peak = self._trader.state.peak_equity
+                    if peak > 0 and equity > 0:
+                        dd_pct = max(0.0, (peak - equity) / peak * 100)
+                    else:
+                        dd_pct = 0.0
+                    self._update_peak_status_label(peak, dd_pct)
                 except Exception:
                     pass
 

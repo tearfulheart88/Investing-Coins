@@ -211,6 +211,17 @@ class StateManager:
             self._peak_equity = current_equity
             logger.info(f"Peak equity 갱신: {current_equity:,.0f}원")
 
+    def reset_peak_equity(self) -> None:
+        """
+        Peak equity 리셋.
+        낙폭 한도 초과로 차단된 신규 매수를 재개하거나,
+        새 실거래 세션 시작 시 현재 자산을 새 기준점으로 재설정할 때 사용.
+        0으로 초기화하면 다음 update_peak_equity() 호출 시 현재 자산이 peak가 됨.
+        """
+        old = self._peak_equity
+        self._peak_equity = 0.0
+        logger.info(f"Peak equity 리셋: {old:,.0f}원 → 0 (다음 갱신 시 현재 자산으로 재설정)")
+
     # ─── 재시작 시 잔고 대조 ──────────────────────────────────────────────────
 
     def reconcile_with_exchange(self, client) -> None:
