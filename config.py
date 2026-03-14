@@ -211,14 +211,15 @@ STRATEGY_PARAMS: dict = {
         "atr_trail_mult":     0.5,       # v5: ATR%의 N배를 trail 폭으로 (최소=trail_drop_pct)
         "ema200_filter":      True,      # v6: EMA200(4h) 장기 추세 필터 (하락 추세 제외)
         "adx_min_vb":         20.0,      # v7: 15→20 (ADX 추세 강도 강화, 횡보 진입 차단)
+        "hard_sl_pct":         3.0,      # v8: 인트라데이 하드 손절 (-N% 즉시 청산, BSV/SAHARA 재발 방지)
     },
     "mr_rsi": {
-        "rsi_buy":            30.0,      # v5: RSI 과매도 매수 기준 강화 (추세장)
-        "rsi_buy_range":      32.0,      # v5: RSI 완화 매수 기준 강화 (약한 횡보)
+        "rsi_buy":            28.0,      # v6: 30→28 (더 강한 과매도만 진입, 하락 추세 필터 강화)
+        "rsi_buy_range":      30.0,      # v6: 32→30 (횡보 완화 기준도 강화)
         "rsi_sell":           65.0,      # RSI 회복 매도 기준
-        "adx_range_thr":      15.0,      # v5: 이 ADX 미만 → 완화 매수 기준 적용
-        "max_hold_hours":     24.0,      # 최대 보유 시간 (초과 시 강제 청산)
-        "hard_sl_pct":        7.0,       # v5: 전략 내부 하드 손절 (%)
+        "adx_range_thr":      15.0,      # 이 ADX 미만 → 완화 매수 기준 적용
+        "max_hold_hours":     12.0,      # v6: 24→12h (하락 추세 코인 장기 물림 방지)
+        "hard_sl_pct":        5.0,       # v6: 7→5% (손절 강화, 대손실 방지)
     },
     "mr_bollinger": {
         "rsi_buy":            35.0,      # RSI 과매도 기준

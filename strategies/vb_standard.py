@@ -45,6 +45,7 @@ _VOL_SMA_PERIOD     = 20     # 거래량 SMA 기간
 _BE_TRIGGER_PCT     = 1.0    # v3: 본절 방어 활성화 기준 (peak PnL ≥ 이 값%)
 _BE_FLOOR_PCT       = 0.2    # v3: 본절 방어 시 최소 수익률(%)
 _TRAIL_DROP_PCT     = 0.5    # v3: 트레일링 — peak에서 이만큼(%) 하락 시 청산
+_HARD_SL_PCT        = 3.0    # v4: 인트라데이 하드 손절 (-N% 즉시 청산, config vb.hard_sl_pct)
 
 _KST = timezone(timedelta(hours=9))
 
@@ -124,6 +125,21 @@ class VBStandardStrategy(BaseStrategy):
     def should_sell_on_signal(self, ticker, current_price, position) -> SellSignal:
         entry = position.buy_price
         pnl_pct = (current_price - entry) / entry * 100
+
+        # ── [0순위] 하드 손절: 진입가 대비 -N% 즉시 청산 (v4) ───────────────
+        try:
+            import config as _cfg
+            hard_sl = _cfg.STRATEGY_PARAMS.get("vb", {}).get("hard_sl_pct", _HARD_SL_PCT)
+        except Exception:
+            hard_sl = _HARD_SL_PCT
+        if pnl_pct <= -hard_sl:
+            reason = f"HARD_SL(pnl={pnl_pct:+.2f}%<=-{hard_sl:.1f}%)"
+            logger.info(
+                f"[vb_standard] ★ 하드 손절 | {ticker} | "
+                f"entry={entry:,.0f} now={current_price:,.0f} | {reason}"
+            )
+            self._peaks.pop(ticker, None)
+            return SellSignal(ticker, True, current_price, reason)
 
         # ── 최고가 갱신 (본절 방어 + 트레일링용) ─────────────────────────────
         peak = self._peaks.get(ticker, current_price)

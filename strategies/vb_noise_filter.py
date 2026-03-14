@@ -87,6 +87,7 @@ _ATR_TRAIL_MULT     = _vb.get("atr_trail_mult",   0.5)
 _EMA200_FILTER      = _vb.get("ema200_filter",    True)   # v6: EMA200(4h) 장기 추세 필터
 _ADX_MIN_VB         = _vb.get("adx_min_vb",       20.0)   # v7: 15→20 노이즈 진입 방지
 _COOLDOWN_HOURS     = _vb.get("cooldown_hours",   2.0)    # v7: 손절 후 재진입 금지 시간
+_HARD_SL_PCT        = _vb.get("hard_sl_pct",       3.0)   # v8: 인트라데이 하드 손절 (-N% 즉시 청산)
 
 _KST = timezone(timedelta(hours=9))
 _ATR_CACHE_SEC   = 300.0    # ATR 캐시 유효시간 (5분)
@@ -122,9 +123,10 @@ class VBNoiseFilterStrategy(BaseStrategy):
         }
         # v5: 매도 사유별 통계
         self._sell_stats: dict[str, dict] = {
-            "TSL":   {"count": 0, "total_pnl": 0.0},
-            "BE":    {"count": 0, "total_pnl": 0.0},
-            "TC":    {"count": 0, "total_pnl": 0.0},
+            "HARD_SL": {"count": 0, "total_pnl": 0.0},  # v8: 인트라데이 하드 손절
+            "TSL":     {"count": 0, "total_pnl": 0.0},
+            "BE":      {"count": 0, "total_pnl": 0.0},
+            "TC":      {"count": 0, "total_pnl": 0.0},
         }
 
     def get_strategy_id(self) -> str:
@@ -427,6 +429,20 @@ class VBNoiseFilterStrategy(BaseStrategy):
     ) -> SellSignal:
         entry = position.buy_price
         pnl_pct = (current_price - entry) / entry * 100
+
+        # ── [0순위] 하드 손절: 진입가 대비 -N% 즉시 청산 (v8) ───────────────
+        # TIME_CUT은 2h 후 발동이라 그 전까지 -3%+ 손실을 방치하는 문제 방지
+        # BSV(-3.03%, 99분 보유), SAHARA(-3.29%, 39분) 같은 케이스 재발 차단
+        if pnl_pct <= -_HARD_SL_PCT:
+            reason = f"HARD_SL(pnl={pnl_pct:+.2f}%<=-{_HARD_SL_PCT:.1f}%)"
+            logger.info(
+                f"[vb_noise_filter] ★ 하드 손절 | {ticker} | "
+                f"entry={entry:,.0f} now={current_price:,.0f} | {reason}"
+            )
+            self._sell_stats["HARD_SL"]["count"] += 1
+            self._sell_stats["HARD_SL"]["total_pnl"] += pnl_pct
+            self.on_position_closed(ticker, reason)
+            return SellSignal(ticker, True, current_price, reason)
 
         # ── 최고가 갱신 (본절 방어 + 트레일링용) ─────────────────────────────
         peak = self._peaks.get(ticker, current_price)
