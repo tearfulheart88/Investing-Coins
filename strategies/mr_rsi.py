@@ -38,6 +38,8 @@ class RSIStrategy(BaseStrategy):
         self._md = market_data
         self._cooldowns: dict[str, float] = {}
         self._peaks: dict[str, float] = {}
+        # v7: BTC 1h MA20 캐시 — (btc_ma20, btc_price, timestamp)
+        self._btc_ma20_cache: tuple[float, float, float] | None = None
 
     def get_strategy_id(self) -> str:
         return "mean_reversion"
@@ -234,6 +236,69 @@ class RSIStrategy(BaseStrategy):
             )
             logger.debug(f"[mr_rsi] {ticker} filtered by 4h EMA200 | {reason}")
             return BuySignal(ticker, False, current_price, reason, metadata=meta)
+
+        # ── [v7] BTC 1h MA20 거시 추세 필터 ─────────────────────────────
+        # BTC가 1h MA20 아래 = 하락장 → RSI 과매도 코인도 계속 하락 → 차단
+        if ticker != "KRW-BTC":
+            try:
+                now_ts = time.time()
+                if (self._btc_ma20_cache is None
+                        or now_ts - self._btc_ma20_cache[2] > 300.0):
+                    btc_1h = self._md.get_ohlcv_intraday(
+                        "KRW-BTC", interval="minute60", count=22
+                    )
+                    if btc_1h is not None and len(btc_1h) >= 21:
+                        _bp = float(btc_1h.iloc[-1]["close"])
+                        _bm = float(btc_1h["close"].iloc[-20:].mean())
+                        self._btc_ma20_cache = (_bm, _bp, now_ts)
+                if self._btc_ma20_cache:
+                    btc_ma20_v, btc_price_v, _ = self._btc_ma20_cache
+                    if btc_price_v < btc_ma20_v:
+                        reason = f"BTC_BEARISH(btc={btc_price_v:,.0f}<ma20={btc_ma20_v:,.0f})"
+                        meta["btc_ma20"] = round(btc_ma20_v, 0)
+                        meta["signal_trace"] = self._build_signal_trace(
+                            ticker, current_price, should_buy=False, reason=reason,
+                            values={"btc_price": btc_price_v, "btc_ma20": btc_ma20_v},
+                        )
+                        logger.debug(f"[mr_rsi] {ticker} blocked by BTC bearish | {reason}")
+                        return BuySignal(ticker, False, current_price, reason, metadata=meta)
+            except Exception:
+                pass  # BTC 조회 실패 시 우회
+
+        # ── [v7] 낙하 중 코인 제외 필터 ─────────────────────────────────
+        # 3일 -20% 이상 하락 = 낙폭과대가 아니라 낙하 중인 칼날 → 차단
+        # 거래량이 여전히 급증 중 = 공황 매도 아직 진행 중 → 차단
+        try:
+            df_daily = self._md.get_ohlcv(ticker, count=10)
+            if df_daily is not None and len(df_daily) >= 4:
+                close_now   = float(df_daily.iloc[-1]["close"])
+                close_3d    = float(df_daily.iloc[-4]["close"])
+                return_3d   = (close_now - close_3d) / close_3d * 100 if close_3d > 0 else 0.0
+
+                if return_3d < -20.0:
+                    reason = f"FALLING_KNIFE_3D({return_3d:.1f}%<-20%)"
+                    meta["return_3d"] = round(return_3d, 2)
+                    meta["signal_trace"] = self._build_signal_trace(
+                        ticker, current_price, should_buy=False, reason=reason,
+                        values={"return_3d_pct": round(return_3d, 4)},
+                    )
+                    logger.debug(f"[mr_rsi] {ticker} falling knife | {reason}")
+                    return BuySignal(ticker, False, current_price, reason, metadata=meta)
+
+                if len(df_daily) >= 7:
+                    vol_recent = float(df_daily.iloc[-3:]["volume"].mean())
+                    vol_prior  = float(df_daily.iloc[-7:-3]["volume"].mean())
+                    if vol_prior > 0 and vol_recent > vol_prior * 1.5:
+                        reason = f"PANIC_VOL_EXPANDING({vol_recent/vol_prior:.1f}x>1.5x)"
+                        meta["vol_ratio_daily"] = round(vol_recent / vol_prior, 2)
+                        meta["signal_trace"] = self._build_signal_trace(
+                            ticker, current_price, should_buy=False, reason=reason,
+                            values={"vol_ratio_daily": round(vol_recent / vol_prior, 4)},
+                        )
+                        logger.debug(f"[mr_rsi] {ticker} panic selling ongoing | {reason}")
+                        return BuySignal(ticker, False, current_price, reason, metadata=meta)
+        except Exception:
+            pass  # 일봉 조회 실패 시 우회
 
         is_weak_range = adx < _ADX_RANGE_THR
         rsi_buy = _RSI_BUY_RANGE if is_weak_range else _RSI_BUY
