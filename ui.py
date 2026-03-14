@@ -206,6 +206,7 @@ class TradingApp(tk.Tk):
         self._trade_db: TradeDB | None = None
         self._last_real_stop_summary: dict | None = None
         self._last_real_stop_realized: dict | None = None
+        self._realized_hide_before_ts: str | None = None  # 이 시각 이전 행은 UI에서 숨김
 
         # 로그 큐
         self._log_queue: queue.Queue = queue.Queue(maxsize=2000)
@@ -367,6 +368,7 @@ class TradingApp(tk.Tk):
         *,
         limit: int | None = 8,
         session_id: str | None = None,
+        after_ts: str | None = None,
     ) -> list[dict]:
         if not self._trade_db:
             return []
@@ -381,6 +383,9 @@ class TradingApp(tk.Tk):
         if session_id:
             where.append("session_id = ?")
             params.append(session_id)
+        if after_ts:
+            where.append("timestamp > ?")
+            params.append(after_ts)
 
         sql = f"""
             SELECT
@@ -517,7 +522,7 @@ class TradingApp(tk.Tk):
                 self._realized_trade_tree.delete(row)
             return
 
-        recent_rows = self._query_completed_real_sells(limit=8)
+        recent_rows = self._query_completed_real_sells(limit=8, after_ts=self._realized_hide_before_ts)
         cumulative_summary = self._query_completed_real_sell_summary()
 
         session_summary = None
@@ -2083,6 +2088,22 @@ class TradingApp(tk.Tk):
             fg=C.ACCENT,
             bg=C.BG,
         ).pack(side="left")
+
+        def _clear_realized_list():
+            from datetime import datetime, timezone
+            self._realized_hide_before_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            self._refresh_realized_trades_panel()
+
+        tk.Button(
+            realized_head,
+            text="목록 지우기",
+            font=self._ui_font(8),
+            bg=C.BG3, fg=C.SUB,
+            activebackground=C.BG4, activeforeground=C.FG,
+            relief="flat", cursor="hand2", padx=6, pady=1,
+            command=_clear_realized_list,
+        ).pack(side="left", padx=(8, 0))
+
         self._realized_summary_var = tk.StringVar(value="실현손익 불러오는 중...")
         tk.Label(
             realized_head,
