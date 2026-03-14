@@ -175,6 +175,22 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 f"{_COOLDOWN_HOURS}h 재진입 금지 | reason={reason}"
             )
 
+    def on_position_reentered(
+        self, ticker: str, new_entry_price: float, reason: str = ""
+    ) -> None:
+        """
+        재진입 시 내부 추적 상태 리셋.
+        - _peaks: 현재가(새 매수가)로 리셋 → 트레일링이 새 기준에서 시작
+        - _time_cut_extended: 해제 → 새 TIME_CUT 윈도우 확보
+        """
+        self._peaks[ticker] = new_entry_price
+        self._time_cut_extended.discard(ticker)
+        logger.info(
+            f"[vb_noise_filter] 재진입 상태 리셋 | {ticker} | "
+            f"peak={new_entry_price:,.0f} | time_cut_extended=cleared"
+        )
+
+
     def reset_daily(self) -> None:
         """09:00 스케줄 매도 후 일괄 초기화."""
         # 일별 통계 로깅 (0건이 아닌 경우에만)

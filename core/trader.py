@@ -23,6 +23,11 @@ from core.order_state_machine import OrderStateMachine, OrderState
 from logging_.trade_logger import TradeLogger, TradeRecord, now_kst
 from logging_.session_manager import SessionManager
 from logging_.log_context import clear_log_mode, set_log_mode
+from core.telegram_notifier import (
+    send_engine_start_notification_async,
+    send_engine_stop_notification,
+    send_trade_summary_notification,
+)
 from logging_.signal_trace_logger import append_signal_trace
 
 logger = logging.getLogger(__name__)
@@ -445,6 +450,13 @@ class Trader:
             f"종목({len(self._active_tickers)}개): {self._active_tickers[:5]} | "
             f"equity={current_equity:,.0f}원 ==="
         )
+        # 텔레그램 시작 알림
+        start_details = (
+            f"- 종목 수: {len(self._active_tickers)}개\n"
+            f"- 시작 자산: {current_equity:,.0f}원\n"
+            f"- 시나리오: {', '.join(s.scenario_id for s in self._scenarios)}"
+        )
+        send_engine_start_notification_async("real", start_details)
         self._running = True
         try:
             self._run_buy_loop()
@@ -530,6 +542,15 @@ class Trader:
                     logger.info("Obsidian 세션 종료 + 일보 저장 완료")
                 except Exception as e:
                     logger.warning(f"Obsidian 종료 기록 실패: {e}")
+
+            # 텔레그램 종료 및 요약 알림
+            try:
+                equity = self.risk.get_total_equity()
+                summary = self._build_obs_summary(equity)
+                send_engine_stop_notification("real", f"- 최종 자산: {equity:,.0f}원")
+                send_trade_summary_notification("real", [summary])
+            except Exception as _tel_e:
+                logger.warning(f"텔레그램 종료 알림 실패: {_tel_e}")
 
             logger.info("시스템 종료 완료")
         finally:

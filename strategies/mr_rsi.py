@@ -302,7 +302,11 @@ class RSIStrategy(BaseStrategy):
                 },
             )
 
+        # v6: locked_profit_price로 재시작 내구성 확보
+        locked = float(getattr(position, "locked_profit_price", 0.0) or 0.0)
         peak = self._peaks.get(ticker, current_price)
+        if locked > entry:
+            peak = max(peak, locked)
         if current_price > peak:
             peak = current_price
         self._peaks[ticker] = peak
@@ -311,6 +315,13 @@ class RSIStrategy(BaseStrategy):
         # --- 2. BREAKEVEN DEFENSE (v6) ---
         if peak_pnl_pct >= _BREAKEVEN_TRIGGER_PCT:
             floor_price = entry * (1 + _BREAKEVEN_LOCK_PCT / 100)
+            # locked_profit_price를 position에 저장 → 재시작 후에도 유지
+            current_locked = float(getattr(position, "locked_profit_price", 0.0) or 0.0)
+            if current_locked < floor_price:
+                try:
+                    position.locked_profit_price = floor_price
+                except Exception:
+                    pass
             if current_price <= floor_price:
                 reason = (
                     f"BREAKEVEN_FLOOR(peak={peak_pnl_pct:+.2f}%"

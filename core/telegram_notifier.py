@@ -219,3 +219,59 @@ def send_real_stop_summary_notification_async(message: str) -> None:
         daemon=True,
         name="TelegramRealStopSummary",
     ).start()
+
+
+def send_engine_start_notification(mode: str, details: str = "") -> bool:
+    """실거래/가상거래 시작 알림 (동기)"""
+    message = f"[{mode.upper()} 거래 시작]\n{details}"
+    return send_message(message)
+
+
+def send_engine_start_notification_async(mode: str, details: str = "") -> None:
+    """실거래/가상거래 시작 알림 (비동기)"""
+    threading.Thread(
+        target=send_engine_start_notification,
+        args=(mode, details),
+        daemon=True,
+        name="TelegramStart",
+    ).start()
+
+
+def send_engine_stop_notification(mode: str, details: str = "") -> bool:
+    """실거래/가상거래 종료 알림 (동기)"""
+    message = f"[{mode.upper()} 거래 종료]\n{details}"
+    return send_message(message)
+
+
+def send_engine_stop_notification_async(mode: str, details: str = "") -> None:
+    """실거래/가상거래 종료 알림 (비동기)"""
+    threading.Thread(
+        target=send_engine_stop_notification,
+        args=(mode, details),
+        daemon=True,
+        name="TelegramStop",
+    ).start()
+
+
+def send_trade_summary_notification(mode: str, summaries: list[dict]) -> bool:
+    """거래 요약 알림 (동기)"""
+    if not summaries:
+        return False
+    lines = [f"[{mode.upper()} 거래 요약]"]
+    for s in summaries:
+        name = s.get("scenario_id") or s.get("account_id") or "Unknown"
+        lines.append(f"- {name}")
+        lines.append(f"  수익률: {s.get('total_pnl_pct', 0):+.2f}%")
+        lines.append(f"  실현손익: {s.get('total_pnl', 0):+,.0f}원")
+        lines.append(f"  승률: {s.get('win_rate', 0):.1f}% ({s.get('sell_count', s.get('total_trades', 0))}회)")
+    return send_message("\n".join(lines))
+
+
+def send_trade_summary_notification_async(mode: str, summaries: list[dict]) -> None:
+    """거래 요약 알림 (비동기)"""
+    threading.Thread(
+        target=send_trade_summary_notification,
+        args=(mode, summaries),
+        daemon=True,
+        name="TelegramSummary",
+    ).start()
