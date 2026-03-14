@@ -107,21 +107,31 @@ DEFAULT_WEIGHT_PCT: float = 100.0              # 단일 전략 시 계좌 전체
 REAL_DEFAULT_BUDGET_PCT: float = 50.0          # 실거래 기본 1회 매매 비중
 
 # ─── 실거래 기본 시나리오 ─────────────────────────────────────────────────────
-# 현재 운영 기본값: 안정형 2전략만 실거래 투입
+# v2 운영 기본값: 안정형 2전략 + vb_noise_filter 3전략 분산 투입
+# 추가 배경: vb_noise_filter는 Antigravity 프로젝트에서 실거래 검증 완료,
+#            파라미터 v7 강화(k_min 0.4, adx 20, vol 2.5, time_cut 2h) 후 투입
+# 보류: pump_catcher — v3 파라미터 가상거래 검증 완료 후 4전략 편입 예정
 REAL_SCENARIO_DEFAULTS: list[dict] = [
     {
         "strategy_id": "mean_reversion",
         "scenario_id": "mr_rsi",
-        "weight_pct": 50.0,
+        "weight_pct": 40.0,
         "ticker_count": 10,
         "budget_pct": 50.0,
     },
     {
         "strategy_id": "trend_following",
         "scenario_id": "smrh_stop",
-        "weight_pct": 50.0,
+        "weight_pct": 35.0,
         "ticker_count": 10,
         "budget_pct": 50.0,
+    },
+    {
+        "strategy_id": "volatility_breakout",
+        "scenario_id": "vb_noise_filter",
+        "weight_pct": 25.0,
+        "ticker_count": 15,
+        "budget_pct": 40.0,
     },
 ]
 
@@ -187,18 +197,18 @@ STRATEGY_PARAMS: dict = {
     "vb": {                              # vb_noise_filter / vb_standard 공통
         "noise_filter_days":  5,         # 노이즈 k 계산 기간 (일봉)
         "ma_period":          15,        # MA 필터 기간
-        "k_min":              0.3,       # K 클램프 하한 (공격적 진입 방지)
+        "k_min":              0.4,       # K 클램프 하한 — v7: 0.3→0.4 (강한 돌파만 허용)
         "k_max":              0.8,       # K 클램프 상한 (지나친 보수 방지)
-        "time_cut_hours":     2.5,       # v5: 2.0→2.5h (추세 형성 여유 시간 확보)
+        "time_cut_hours":     2.0,       # v7: 2.5→2.0h (빠른 타임컷, 노이즈 손실 억제)
         "min_momentum_pct":   0.5,       # v5: 0.3→0.5% (유의미한 모멘텀 구분 기준)
-        "vol_mult":           2.0,       # v5: 2.5→2.0 (매수 기회 과도 제한 방지)
+        "vol_mult":           2.5,       # v7: 2.0→2.5 (강한 거래량 폭발만 진입)
         "be_trigger_pct":     1.0,       # v3: 본절방어 활성화 기준 (peak PnL ≥ N%)
         "be_floor_pct":       0.2,       # v3: 본절방어 최소수익률 (SL→진입가+N%)
         "trail_drop_pct":     1.0,       # v5: 0.5→1.0% (노이즈 조기청산 방지, ATR 적응)
         "use_atr_trail":      True,      # v5: ATR 기반 동적 트레일링 활성화
         "atr_trail_mult":     0.5,       # v5: ATR%의 N배를 trail 폭으로 (최소=trail_drop_pct)
         "ema200_filter":      True,      # v6: EMA200(4h) 장기 추세 필터 (하락 추세 제외)
-        "adx_min_vb":         15.0,      # v6: ADX 최소 추세 강도 (0=비활성, VB 횡보 필터)
+        "adx_min_vb":         20.0,      # v7: 15→20 (ADX 추세 강도 강화, 횡보 진입 차단)
     },
     "mr_rsi": {
         "rsi_buy":            30.0,      # v5: RSI 과매도 매수 기준 강화 (추세장)
