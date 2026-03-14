@@ -2644,6 +2644,8 @@ class TradingApp(tk.Tk):
             from strategies.registry import load_strategy
 
             market_data = MarketData()
+            # 가상거래는 5분 주기로 재평가하므로 캐시 TTL을 300초로 확장 → 시나리오 초기화 중 API 재호출 방지
+            market_data._INTRADAY_CACHE_SEC = 300.0
             price_cache = PriceCache()
 
             all_tickers: set[str] = set()
@@ -2665,6 +2667,7 @@ class TradingApp(tk.Tk):
                     item["ticker_count"],
                     blacklist=set(config.TICKER_BLACKLIST),
                     base_tickers=raw_pool,
+                    skip_ranking=True,  # 초기 기동 속도 최적화: 스코어링 생략, 거래량 순 선택
                 )
                 all_tickers.update(scenario_tickers)
 

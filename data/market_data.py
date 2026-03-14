@@ -861,6 +861,7 @@ class MarketData:
         must_keep: list[str] | None = None,
         base_tickers: list[str] | None = None,
         pool_size: int | None = None,
+        skip_ranking: bool = False,
     ) -> list[str]:
         """
         전략별 최소 히스토리를 만족하는 거래대금 상위 종목만 선별한다.
@@ -869,6 +870,10 @@ class MarketData:
         - must_keep: 이미 보유 중이라 refresh 이후에도 계속 봐야 하는 종목
         - 반환값은 `선별 종목 + must_keep(중복 제거)` 형태이며, 보유 종목 수만큼
           최종 길이는 n을 초과할 수 있다.
+        - skip_ranking: True이면 패턴 스코어링을 건너뛰고 거래량 순 상위 N개 반환
+          (가상거래 초기 기동 시 API 호출 최소화용)
+        - skip_ranking=True일 때 히스토리 체크도 생략: DATA_ERROR는 전략 내부에서
+          안전하게 처리되므로 시작 속도 최우선
         """
         if n <= 0 and not must_keep:
             return []
@@ -876,12 +881,28 @@ class MarketData:
         keep_list = list(dict.fromkeys(must_keep or []))
         keep_set = set(keep_list)
         blk = set(blacklist or set())
-        requirements = strategy.get_history_requirements()
-        profile = self.get_ticker_selection_profile(strategy, n, pool_size)
 
         if base_tickers is None:
+            profile = self.get_ticker_selection_profile(strategy, n, pool_size)
             effective_pool = profile["pool_size"]
             base_tickers = self.get_top_tickers_by_volume(effective_pool)
+
+        if skip_ranking:
+            # 빠른 시작 모드: 히스토리/스코어링 API 생략 → 거래량 순 상위 N개
+            selected: list[str] = []
+            for ticker in base_tickers:
+                if ticker in blk or ticker in keep_set or ticker in selected:
+                    continue
+                selected.append(ticker)
+                if len(selected) >= n:
+                    break
+            for ticker in keep_list:
+                if ticker not in selected:
+                    selected.append(ticker)
+            return selected
+
+        requirements = strategy.get_history_requirements()
+        profile = self.get_ticker_selection_profile(strategy, n, pool_size)
 
         eligible: list[str] = []
         for ticker in base_tickers:
