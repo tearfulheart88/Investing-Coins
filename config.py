@@ -248,17 +248,17 @@ STRATEGY_PARAMS: dict = {
         "macd_signal":  70,              # MACD 시그널 기간 (원본 명세: 70)
     },
     "pump_catcher": {
-        "vol_mult":              8.0,    # 거래량 폭발 배수 (SMA20 × N배 이상) — v2: 15→8 (0거래 해소)
-        "spike_pct":             1.5,    # 1분봉 시가 대비 최소 급등률 (%) — v2: 3.0→1.5
+        "vol_mult":             12.0,    # 거래량 폭발 배수 (SMA20 × N배 이상) — v3: 8→12 (강한 폭발만)
+        "spike_pct":             2.0,    # 1분봉 시가 대비 최소 급등률 (%) — v3: 1.5→2.0
         "max_gain_from_open":   15.0,    # 일봉 시가 대비 최대 허용 상승률 (%)
         "min_body_ratio":        0.5,    # 양봉 몸통 비율 하한 (설거지 위꼬리 방지)
-        "rsi_max":              85.0,    # RSI 최대 허용값 (과열 방지)
+        "rsi_max":              78.0,    # RSI 최대 허용값 — v3: 85→78 (고점 진입 강력 차단)
         "trail_pct":             2.0,    # 기본 트레일링 스탑 (%)
-        "hard_sl_pct":           3.0,    # 하드 손절 (%)
-        "tp_lock_pct":           5.0,    # 수익 보존 강화 발동 기준 (%)
+        "hard_sl_pct":           4.5,    # 하드 손절 (%) — v3: 3→4.5 (슬리피지 버퍼 포함)
+        "tp_lock_pct":           2.5,    # 수익 보존 강화 발동 기준 (%) — v3: 5→2.5 (달성 가능)
         "trail_locked_pct":      1.0,    # 수익 보존 후 좁혀진 트레일링 (%)
         "vol_fade_mult":         2.0,    # 거래량 소멸 판정 기준 배수
-        "max_hold_minutes":     10.0,    # 최대 보유 시간 (분)
+        "max_hold_minutes":     15.0,    # 최대 보유 시간 (분) — v3: 10→15
         "cooldown_minutes":     30.0,    # 동일 종목 재진입 쿨다운 (분)
     },
 }

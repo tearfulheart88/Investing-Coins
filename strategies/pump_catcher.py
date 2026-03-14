@@ -24,18 +24,18 @@
   3. 거래량 소멸:      1m 거래량 < SMA20 × vol_fade_mult AND PnL < 1% → 모멘텀 소멸 → 청산
   4. 타임컷:           max_hold_minutes(기본 10분) 초과 AND PnL < 1.0% → 청산
 
-■ 주요 파라미터
-  vol_mult            = 15.0   거래량 폭발 배수 (SMA20 × N배)
-  spike_pct           = 3.0    양봉 최소 급등률 (%)
+■ 주요 파라미터 (v3 기준)
+  vol_mult            = 12.0   거래량 폭발 배수 (SMA20 × N배) — v3: 8→12
+  spike_pct           = 2.0    양봉 최소 급등률 (%) — v3: 1.5→2.0
   max_gain_from_open  = 15.0   일봉 시가 대비 최대 허용 상승률 (%)
   min_body_ratio      = 0.5    양봉 몸통 비율 하한 (0~1)
-  rsi_max             = 85.0   RSI 최대 허용값
+  rsi_max             = 78.0   RSI 최대 허용값 — v3: 85→78 (고점 진입 강력 차단)
   trail_pct           = 2.0    기본 트레일링 스탑 (%)
-  hard_sl_pct         = 3.0    하드 손절 (%)
-  tp_lock_pct         = 5.0    수익 보존 강화 발동 기준 (%)
+  hard_sl_pct         = 4.5    하드 손절 (%) — v3: 3→4.5 (슬리피지 버퍼)
+  tp_lock_pct         = 2.5    수익 보존 강화 발동 기준 (%) — v3: 5→2.5 (달성 가능)
   trail_locked_pct    = 1.0    수익 보존 후 좁혀진 트레일링 (%)
   vol_fade_mult       = 2.0    거래량 소멸 판정 기준 배수 (SMA × N배 미만)
-  max_hold_minutes    = 10.0   최대 보유 시간 (분)
+  max_hold_minutes    = 15.0   최대 보유 시간 (분) — v3: 10→15
   cooldown_minutes    = 30.0   동일 종목 재진입 쿨다운 (분)
 
 임포트 규칙:
@@ -69,6 +69,32 @@ _COOLDOWN_MIN       = _pc.get("cooldown_minutes",        30.0)
 
 _VOL_SMA_PERIOD = 20   # 거래량 SMA 기간 (고정, 1분봉 기준 20분 평균)
 _KST = timezone(timedelta(hours=9))
+
+
+def _rsi_last(closes: list, period: int = 7) -> float | None:
+    """closes 리스트 마지막 지점의 Wilder RSI(period)를 계산.
+
+    데이터가 부족하거나 손실 평균이 0이면 None 반환.
+    market_data 없이 순수 계산 (buy 로직 내 RSI 기울기 체크용).
+    """
+    if len(closes) < period + 2:
+        return None
+    gains: list[float] = []
+    losses: list[float] = []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    # Wilder 초기 평균
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    # Wilder 평활
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
 
 
 class PumpCatcherStrategy(BaseStrategy):
@@ -260,7 +286,7 @@ class PumpCatcherStrategy(BaseStrategy):
                 )
 
         # ── [5] RSI 과열 방지 필터 ───────────────────────────────────────────
-        # RSI(7, 1m) 이 극단적 과매수(85+)이면 이미 천장권 → 진입 금지
+        # RSI(7, 1m) 이 극단적 과매수(78+)이면 이미 천장권 → 진입 금지
         # 조회 실패(신규 상장 등) 시에는 필터 우회
         rsi_1m: float | None = None
         try:
@@ -273,6 +299,22 @@ class PumpCatcherStrategy(BaseStrategy):
                 )
         except Exception:
             pass  # 데이터 부족 → 우회
+
+        # ── [5b] RSI 하락 전환 감지 ──────────────────────────────────────────
+        # 현재 RSI가 직전봉 RSI보다 3포인트 이상 낮으면 이미 모멘텀이 꺾인 것
+        # → 고점 직후 뒤늦은 진입 차단 (slippage + 즉시 손절 패턴 방지)
+        if rsi_1m is not None and len(df_1m) >= _VOL_SMA_PERIOD + 2:
+            try:
+                prev_closes = [float(c) for c in df_1m["close"].values[:-1]]
+                prev_rsi = _rsi_last(prev_closes, period=7)
+                if prev_rsi is not None and rsi_1m < prev_rsi - 3.0:
+                    self._buy_stats["rsi_hot"] += 1
+                    return BuySignal(
+                        ticker=ticker, should_buy=False, current_price=current_price,
+                        reason=f"RSI_FALLING({prev_rsi:.1f}→{rsi_1m:.1f})",
+                    )
+            except Exception:
+                pass  # 계산 실패 시 우회
 
         # ── [6] 이미 하락 전환 중 필터 ───────────────────────────────────────
         # 현재가가 당 1분봉 고가의 95% 미만 → 펌핑이 지나간 뒤 하락 중
@@ -373,8 +415,9 @@ class PumpCatcherStrategy(BaseStrategy):
 
         # ── [3순위] 거래량 소멸 청산 ─────────────────────────────────────────
         # 펌핑을 이끈 비정상 거래량이 다시 평범해지면 모멘텀 종료를 뜻함
-        # 수익이 1% 미만인 상태에서 거래량이 SMA의 N배 이하로 떨어지면 탈출
-        if pnl_pct < 1.0:
+        # 수익이 2% 미만인 상태에서 거래량이 SMA의 N배 이하로 떨어지면 탈출
+        # v3: 1.0→2.0% (모멘텀 소멸 시 더 빨리 이탈하여 손실 확대 방지)
+        if pnl_pct < 2.0:
             try:
                 vol_now, vol_sma = self._md.compute_volume_sma_intraday(
                     ticker, _VOL_SMA_PERIOD, "minute1"
