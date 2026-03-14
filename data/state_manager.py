@@ -28,6 +28,8 @@ class Position:
     take_profit_label: str = ""
     locked_profit_price: float = 0.0
     entry_metadata: dict = field(default_factory=dict)
+    reentry_count: int = 0              # 재진입 횟수 (0=최초 진입)
+    cumulative_realized_pct: float = 0.0  # 이전 재진입 사이클 누적 확정 수익률 (%)
 
     def unrealized_pnl_pct(self, current_price: float) -> float:
         """미실현 손익률"""
@@ -87,6 +89,8 @@ class StateManager:
                     pos_dict.setdefault("take_profit_label", "")
                     pos_dict.setdefault("locked_profit_price", 0.0)
                     pos_dict.setdefault("entry_metadata", {})
+                    pos_dict.setdefault("reentry_count", 0)
+                    pos_dict.setdefault("cumulative_realized_pct", 0.0)
                     if pos_dict["entry_metadata"] is None:
                         pos_dict["entry_metadata"] = {}
                     self._positions[ticker] = Position(**pos_dict)
@@ -169,6 +173,8 @@ class StateManager:
         take_profit_label: str | None = None,
         locked_profit_price: float | None = None,
         entry_metadata: dict | None = None,
+        reentry_count: int | None = None,
+        cumulative_realized_pct: float | None = None,
     ) -> bool:
         """
         재진입(Re-entry): 포지션의 기준 매수가와 손절가를 갱신합니다.
@@ -193,6 +199,10 @@ class StateManager:
                 pos.locked_profit_price = locked_profit_price
             if entry_metadata is not None:
                 pos.entry_metadata = dict(entry_metadata)
+            if reentry_count is not None:
+                pos.reentry_count = reentry_count
+            if cumulative_realized_pct is not None:
+                pos.cumulative_realized_pct = cumulative_realized_pct
         self.save()
         logger.info(
             f"[StateManager] 재진입 갱신 | {ticker} | "

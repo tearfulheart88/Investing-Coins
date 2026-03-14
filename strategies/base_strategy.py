@@ -104,6 +104,13 @@ class BaseStrategy(ABC):
     - 새 전략 = 이 클래스 상속 + strategies/registry.py 한 줄 추가
     """
 
+    # Trader.__init__() 에서 OrderbookCache 주입 (선택적)
+    _orderbook_cache = None  # type: ignore
+
+    def inject_orderbook(self, cache) -> None:  # type: ignore
+        """호가창 캐시 주입. Trader가 초기화 후 호출."""
+        self._orderbook_cache = cache
+
     @abstractmethod
     def get_strategy_id(self) -> str:
         """예: 'volatility_breakout'"""

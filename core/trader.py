@@ -151,6 +151,13 @@ class Trader:
                 log_mode="real",
             )
 
+        # ── 전략에 OrderbookCache 주입 (호가창 압력 필터용) ─────────────────────
+        for _sc in self._scenarios:
+            try:
+                _sc.strategy.inject_orderbook(self.orderbook_cache)
+            except Exception:
+                pass
+
         # ── AutoTuner (ATR% 기반 파라미터 자동 조정) ──────────────────────────
         self.auto_tuner: AutoTuner | None = None
         if config.USE_AUTO_TUNER:
@@ -1014,7 +1021,14 @@ class Trader:
             float(getattr(position, "locked_profit_price", 0.0) or 0.0),
             prev_buy_price,
         )
-        new_stop = max(price * (1 - config.STOP_LOSS_PCT), locked_floor)
+        # 재진입 후 손절은 0.5% — 이전 수익 보존 (일반 손절 3%보다 타이트)
+        new_stop = max(price * (1 - config.REENTRY_STOP_LOSS_PCT), locked_floor)
+
+        # 누적 확정 수익률 갱신: 이전 사이클 수익을 cumulative에 추가
+        prev_cum = float(getattr(position, "cumulative_realized_pct", 0.0) or 0.0)
+        cycle_pct = (price - prev_buy_price) / prev_buy_price * 100 if prev_buy_price > 0 else 0.0
+        new_cum = prev_cum + cycle_pct
+        prev_reentry_count = int(getattr(position, "reentry_count", 0) or 0)
         self.state.update_position_entry(
             position.ticker,
             price,
@@ -1023,6 +1037,8 @@ class Trader:
             take_profit_label=getattr(position, "take_profit_label", ""),
             locked_profit_price=locked_floor,
             entry_metadata=getattr(position, "entry_metadata", {}),
+            reentry_count=prev_reentry_count + 1,
+            cumulative_realized_pct=new_cum,
         )
         self.order_sm.sync_position(
             ticker=position.ticker,

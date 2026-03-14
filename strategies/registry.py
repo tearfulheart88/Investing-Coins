@@ -15,6 +15,7 @@ from strategies.macd_rsi_trend         import MACDRSITrendStrategy
 from strategies.smrh_stop              import SMRHStopStrategy
 from strategies.pump_catcher           import PumpCatcherStrategy
 from strategies.momentum_scout         import MomentumScoutStrategy
+from strategies.btc_momentum_lag       import BtcMomentumLagStrategy
 from strategies.base_strategy          import BaseStrategy
 
 STRATEGY_MAP: dict[tuple[str, str], type] = {
@@ -28,6 +29,7 @@ STRATEGY_MAP: dict[tuple[str, str], type] = {
     ("scalping",            "scalping_5ema_reversal"): FiveEMAReversalStrategy,
     ("scalping",            "pump_catcher")          : PumpCatcherStrategy,
     ("scalping",            "momentum_scout")        : MomentumScoutStrategy,
+    ("scalping",            "btc_momentum_lag")      : BtcMomentumLagStrategy,
     ("trend_following",     "macd_rsi_trend")        : MACDRSITrendStrategy,
     ("trend_following",     "smrh_stop")             : SMRHStopStrategy,
 }

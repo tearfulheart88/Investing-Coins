@@ -306,6 +306,22 @@ class RSIStrategy(BaseStrategy):
 
         should_buy = rsi <= rsi_buy
         reason = "RSI_OVERSOLD" if should_buy else f"RSI_NORMAL({rsi:.1f})"
+
+        # ── [v7] 호가창 압력 필터: RSI 과매도여도 실매도 압력이 강하면 진입 차단 ──
+        if should_buy and self._orderbook_cache is not None:
+            try:
+                ob = self._orderbook_cache.get(ticker)
+                if ob is not None and ob.total_bid_size > 0 and ob.total_ask_size > 0:
+                    if ob.total_ask_size > ob.total_bid_size * 1.3:
+                        reason = (
+                            f"SELL_PRESSURE("
+                            f"ask={ob.total_ask_size:.2f}"
+                            f">bid={ob.total_bid_size:.2f}x1.3)"
+                        )
+                        should_buy = False
+            except Exception:
+                pass  # 호가 데이터 없으면 필터 우회 (fail-safe)
+
         meta["signal_trace"] = self._build_signal_trace(
             ticker,
             current_price,

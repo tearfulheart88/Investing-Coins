@@ -2058,13 +2058,14 @@ class TradingApp(tk.Tk):
         self._real_pos_tree = self._make_tree(pf, [
             ("scenario",  "전략",      72),
             ("ticker",    "종목",      78),
-            ("cur_price", "현재가",    92),
-            ("buy_price", "매수가",    92),
-            ("volume",    "수량",      96),
-            ("stop_loss", "손절가",    92),
-            ("target",    "익절목표", 100),
-            ("pnl_krw",   "손익(원)",  96),
-            ("pnl_pct",   "수익률",    72),
+            ("cur_price", "현재가",    88),
+            ("buy_price", "매수가",    88),
+            ("stop_loss", "손절가",    88),
+            ("invested",  "투자금액",  88),
+            ("reentry",   "재진입",    56),
+            ("pnl_krw",   "손익(원)",  92),
+            ("pnl_pct",   "수익률",    68),
+            ("cum_pnl",   "누적수익률", 76),
         ])
         self._real_pos_tree.bind("<ButtonRelease-1>", self._on_real_pos_click)
         self._real_pos_tree.config(cursor="hand2")
@@ -2801,17 +2802,22 @@ class TradingApp(tk.Tk):
             except Exception:
                 price, pnl_pct, pnl_krw, tag = None, None, None, ""
             scen = getattr(pos, "scenario_id", "—") or "—"
-            target_display = self._get_target_display(pos)
+            reentry_count = int(getattr(pos, "reentry_count", 0) or 0)
+            cum_realized  = float(getattr(pos, "cumulative_realized_pct", 0.0) or 0.0)
+            cum_total_pct = cum_realized + (pnl_pct if pnl_pct is not None else 0.0)
+            reentry_str   = f"{reentry_count}회" if reentry_count > 0 else "—"
+            cum_tag       = "profit" if cum_total_pct >= 0 else "loss"
             self._real_pos_tree.insert("", "end", tags=(tag,), values=(
                 scen,
                 pos.ticker,
                 self._format_price(price),
                 self._format_price(pos.buy_price),
-                self._format_volume(pos.volume),
                 self._format_price(pos.stop_loss_price),
-                target_display,
+                f"{pos.krw_spent:,}원",
+                reentry_str,
                 "—" if pnl_krw is None else f"{pnl_krw:+,.0f}원",
                 "—" if pnl_pct is None else f"{pnl_pct:+.2f}%",
+                f"{cum_total_pct:+.2f}%" if pnl_pct is not None else "—",
             ))
 
     def _update_paper_table(self, summaries: list[dict]) -> None:

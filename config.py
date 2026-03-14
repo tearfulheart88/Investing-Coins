@@ -158,6 +158,7 @@ PAPER_SCENARIO_DEFAULTS: list[dict] = [
     {"scenario_id": "scalping_5ema_reversal","ticker_count": 5,  "budget_pct": 40.0, "profile": "aggressive"},
     {"scenario_id": "pump_catcher",          "ticker_count": 10, "budget_pct": 30.0, "profile": "aggressive"},
     {"scenario_id": "momentum_scout",        "ticker_count": 30, "budget_pct": 30.0, "profile": "aggressive"},
+    {"scenario_id": "btc_momentum_lag",      "ticker_count": 20, "budget_pct": 30.0, "profile": "aggressive"},
     {"scenario_id": "macd_rsi_trend",        "ticker_count": 10, "budget_pct": 50.0, "profile": "neutral"},
     {"scenario_id": "smrh_stop",             "ticker_count": 10, "budget_pct": 50.0, "profile": "stable"},
 ]
@@ -313,6 +314,7 @@ GEMINI_MAX_TRADES: int = 50              # 분석에 사용할 최근 거래 수
 #   예) {"vb_noise_filter", "mr_rsi"}
 #       빈 set() = 전체 비활성화
 MAX_REENTRY_COUNT: int = 3             # 최대 재진입 횟수 (무한 루프 방지)
+REENTRY_STOP_LOSS_PCT: float = 0.005  # 재진입 후 손절 기준 (0.5%) — 이전 수익 보존용
 REENTRY_ENABLED_SCENARIOS: set = {      # 기본값: 전체 전략 활성화
     "vb_noise_filter",
     "vb_standard",

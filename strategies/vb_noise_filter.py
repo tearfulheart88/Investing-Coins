@@ -125,6 +125,7 @@ class VBNoiseFilterStrategy(BaseStrategy):
             "no_volume":      0,   # 거래량 급증 미달
             "false_breakout": 0,   # v8: 5분봉 연속 양봉 미확인 (거짓 돌파)
             "high_proximity": 0,   # 윗꼬리 저항 근접
+            "sell_pressure":  0,   # v9: 호가창 매도 압력 우위 (gabagool22 인사이트)
             "data_error":     0,   # 데이터 조회 오류
             "passed":         0,   # 모든 필터 통과 (매수 신호)
         }
@@ -417,6 +418,23 @@ class VBNoiseFilterStrategy(BaseStrategy):
             except Exception:
                 pass  # 데이터 조회 실패 시 필터 우회
 
+        # ── [v9] 호가창 압력 필터: 매도 압력 우위 시 진입 차단 ─────────────────
+        # gabagool22 마켓메이킹 인사이트: 실수요 없이 기술 신호만으로 진입하면 즉시 역행
+        if should and self._orderbook_cache is not None:
+            try:
+                ob = self._orderbook_cache.get(ticker)
+                if ob is not None and ob.total_bid_size > 0 and ob.total_ask_size > 0:
+                    if ob.total_ask_size > ob.total_bid_size * 1.3:
+                        self._buy_stats["sell_pressure"] += 1
+                        reason = (
+                            f"SELL_PRESSURE("
+                            f"ask={ob.total_ask_size:.2f}"
+                            f">bid={ob.total_bid_size:.2f}x1.3)"
+                        )
+                        should = False
+            except Exception:
+                pass  # 호가 데이터 없으면 필터 우회 (fail-safe)
+
         # ── 고점 이격도 필터: 당일 고가 아래 1% 이내 → 윗꼬리 저항 회피 ────
         if should and not df_daily.empty:
             try:
@@ -459,7 +477,8 @@ class VBNoiseFilterStrategy(BaseStrategy):
                 f"추세X={self._buy_stats['no_uptrend']} "
                 f"거래량X={self._buy_stats['no_volume']} "
                 f"거짓돌파={self._buy_stats['false_breakout']} "
-                f"고점={self._buy_stats['high_proximity']}"
+                f"고점={self._buy_stats['high_proximity']} "
+                f"매도압력={self._buy_stats['sell_pressure']}"
             )
 
         return BuySignal(
