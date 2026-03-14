@@ -2540,6 +2540,7 @@ class TradingApp(tk.Tk):
                     ticker_count,
                     blacklist=set(config.TICKER_BLACKLIST),
                     base_tickers=raw_pool,
+                    skip_ranking=True,  # 빠른 시작: 첫 ticker refresh 사이클에서 정식 랭킹 적용
                 )
                 scenarios.append({
                     "strategy_id":  strat_id,
