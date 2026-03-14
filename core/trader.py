@@ -183,6 +183,7 @@ class Trader:
 
         # 거래 잠금: 스케줄러(09:00매도)와 메인루프 동시 실행 방지
         self._trade_lock = threading.Lock()
+        self._reentry_counts: dict[str, int] = {}  # ticker -> reentry count
         self._ticker_refresh_lock = threading.Lock()
 
         # Obsidian 일보용 세션 거래 누적
@@ -963,6 +964,12 @@ class Trader:
             return False
         if any(tag in sell_signal.reason for tag in ("STOP_LOSS", "ENGINE_STOP", "HARD_SL")):
             return False
+        # v6: reentry count limit
+        ticker = position.ticker
+        count = self._reentry_counts.get(ticker, 0)
+        if count >= config.MAX_REENTRY_COUNT:
+            logger.info(f"[Re-entry] {ticker} blocked: count={count} >= max={config.MAX_REENTRY_COUNT}")
+            return False
         return price > position.buy_price
 
     def _execute_reentry(
@@ -1016,6 +1023,8 @@ class Trader:
         )
 
         # 거래 로그: REENTRY 이벤트 기록
+        self._reentry_counts[position.ticker] = self._reentry_counts.get(position.ticker, 0) + 1
+
         self.trade_logger.log_trade(TradeRecord(
             ticker      = position.ticker,
             action      = "REENTRY",
@@ -1345,6 +1354,7 @@ class Trader:
         # 매도 성공 시 실패 카운터/쿨다운 초기화
         self._sell_fail_count.pop(position.ticker, None)
         self._sell_cooldown.pop(position.ticker, None)
+        self._reentry_counts.pop(position.ticker, None)  # reset reentry counter
 
         # 전략 내부 상태 정리 (peak, 타임컷 연장 등) — reason 전달로 쿨다운 등 후처리 가능
         for _s in self._scenarios:

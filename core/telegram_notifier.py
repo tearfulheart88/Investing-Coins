@@ -11,7 +11,8 @@ import config
 logger = logging.getLogger(__name__)
 
 _AUTO_CHAT_ID: str | None = None
-_AUTO_CHAT_LOOKUP_FAILED = False
+_AUTO_CHAT_LOOKUP_FAILED_AT: float = 0.0   # 마지막 실패 시각
+_AUTO_RETRY_INTERVAL: float = 300.0       # 5분마다 재시도
 
 
 def _fmt_price(price: float) -> str:
@@ -70,7 +71,7 @@ def detect_chat_id_for_token(token: str) -> str:
 
 
 def _resolve_chat_id() -> str:
-    global _AUTO_CHAT_ID, _AUTO_CHAT_LOOKUP_FAILED
+    global _AUTO_CHAT_ID, _AUTO_CHAT_LOOKUP_FAILED_AT
 
     explicit = (config.TELEGRAM_CHAT_ID or "").strip()
     if explicit:
@@ -82,19 +83,23 @@ def _resolve_chat_id() -> str:
 
     if _AUTO_CHAT_ID:
         return _AUTO_CHAT_ID
-    if _AUTO_CHAT_LOOKUP_FAILED:
+
+    # 5분마다 자동 감지 재시도 (이전: 1회 실패 시 영구 포기)
+    import time as _time
+    now = _time.time()
+    if _AUTO_CHAT_LOOKUP_FAILED_AT > 0 and (now - _AUTO_CHAT_LOOKUP_FAILED_AT) < _AUTO_RETRY_INTERVAL:
         return ""
 
     detected = detect_chat_id_for_token(token)
     if detected:
         _AUTO_CHAT_ID = detected
+        _AUTO_CHAT_LOOKUP_FAILED_AT = 0.0
         logger.info(f"[Telegram] 최근 대화 chat id 자동 감지: {detected}")
         return detected
 
-    _AUTO_CHAT_LOOKUP_FAILED = True
+    _AUTO_CHAT_LOOKUP_FAILED_AT = now
     logger.warning(
-        "[Telegram] chat id를 찾지 못했습니다. 봇에게 먼저 메시지를 보내거나 "
-        "설정 탭에 chat id를 직접 입력하세요."
+        "[Telegram] chat id를 찾지 못했습니다. 텔레그램에서 봇에게 /start를 보내세요."
     )
     return ""
 
@@ -139,6 +144,34 @@ def send_message_async(text: str) -> None:
         name="TelegramSend",
     ).start()
 
+
+
+def send_real_trade_buy_notification(record) -> bool:
+    """실제거래 매수 완료 알림"""
+    if not config.TELEGRAM_NOTIFY_REAL_SELLS:
+        return False
+
+    buy_price = float(record.price or 0.0)
+    krw_amount = float(record.krw_amount or 0.0)
+
+    message = (
+        "[실제거래 매수 완료]\n"
+        f"- 전략: {record.scenario_id}\n"
+        f"- 종목: {record.ticker}\n"
+        f"- 매수가: {_fmt_price(buy_price)}\n"
+        f"- 투자금: {krw_amount:,.0f}원\n"
+        f"- 사유: {record.reason}"
+    )
+    return send_message(message)
+
+
+def send_real_trade_buy_notification_async(record) -> None:
+    threading.Thread(
+        target=send_real_trade_buy_notification,
+        args=(record,),
+        daemon=True,
+        name="TelegramRealBuy",
+    ).start()
 
 def send_real_trade_close_notification(record) -> bool:
     if not config.TELEGRAM_NOTIFY_REAL_SELLS:

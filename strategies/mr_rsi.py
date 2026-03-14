@@ -1,5 +1,5 @@
 """
-Strategy: RSI oversold mean reversion (v5 baseline)
+Strategy: RSI oversold mean reversion (v6)
 Scenario ID: mr_rsi
 """
 
@@ -23,9 +23,12 @@ _RSI_SELL = 65.0
 _ADX_RANGE_THR = 15.0
 _MAX_HOLD_HOURS = 24.0
 _COOLDOWN_HOURS = 4.0
-_TRAIL_TRIGGER_PCT = 1.5
-_TRAIL_DROP_PCT = 1.0
+_TRAIL_TRIGGER_PCT = 2.5     # v6: 1.5->2.5
+_TRAIL_DROP_PCT = 1.5        # v6: 1.0->1.5
 _HARD_SL_PCT = 7.0
+_BREAKEVEN_TRIGGER_PCT = 1.0  # v6: peak PnL% to activate floor
+_BREAKEVEN_LOCK_PCT = 0.2     # v6: lock entry + 0.2%
+_MAX_HOLD_EXTEND_HOURS = 12.0 # v6: grace period for MAX_HOLD
 
 _KST = timezone(timedelta(hours=9))
 
@@ -305,6 +308,37 @@ class RSIStrategy(BaseStrategy):
         self._peaks[ticker] = peak
         peak_pnl_pct = (peak - entry) / entry * 100
 
+        # --- 2. BREAKEVEN DEFENSE (v6) ---
+        if peak_pnl_pct >= _BREAKEVEN_TRIGGER_PCT:
+            floor_price = entry * (1 + _BREAKEVEN_LOCK_PCT / 100)
+            if current_price <= floor_price:
+                reason = (
+                    f"BREAKEVEN_FLOOR(peak={peak_pnl_pct:+.2f}%"
+                    f"|floor={floor_price:,.0f}"
+                    f"|pnl={pnl_pct:+.2f}%)"
+                )
+                logger.info(
+                    f"[mr_rsi] breakeven defense | {ticker} | "
+                    f"entry={entry:,.0f} peak={peak:,.0f} "
+                    f"floor={floor_price:,.0f} now={current_price:,.0f} | {reason}"
+                )
+                return SellSignal(
+                    ticker, True, current_price, reason,
+                    metadata={"signal_trace": self._build_sell_signal_trace(
+                        ticker, current_price, position,
+                        should_sell=True, reason=reason,
+                        values={
+                            "pnl_pct": round(pnl_pct, 4),
+                            "peak_pnl_pct": round(peak_pnl_pct, 4),
+                            "floor_price": round(floor_price, 8),
+                            "breakeven_trigger_pct": float(_BREAKEVEN_TRIGGER_PCT),
+                            "breakeven_lock_pct": float(_BREAKEVEN_LOCK_PCT),
+                        },
+                        include_market_context=True,
+                    )},
+                )
+
+        # --- 3. TRAILING STOP ---
         if peak_pnl_pct >= _TRAIL_TRIGGER_PCT:
             drop_from_peak = (peak - current_price) / peak * 100
             if drop_from_peak >= _TRAIL_DROP_PCT:
@@ -363,11 +397,19 @@ class RSIStrategy(BaseStrategy):
                 },
             )
 
-        if rsi >= _RSI_SELL:
-            reason = f"RSI_RECOVERED({rsi:.1f})"
+        # v6: adaptive RSI threshold based on current PnL
+        if pnl_pct >= 3.0:
+            rsi_sell_thr = 60.0
+        elif pnl_pct >= 1.0:
+            rsi_sell_thr = 65.0
+        else:
+            rsi_sell_thr = 70.0
+
+        if rsi >= rsi_sell_thr:
+            reason = f"RSI_RECOVERED({rsi:.1f}>={rsi_sell_thr:.0f}|pnl={pnl_pct:+.2f}%)"
             logger.info(
                 f"[mr_rsi] exit on RSI recovery | {ticker} | "
-                f"RSI(1h)={rsi:.1f} >= {_RSI_SELL} | pnl={pnl_pct:+.2f}%"
+                f"RSI(1h)={rsi:.1f} >= {rsi_sell_thr} | pnl={pnl_pct:+.2f}%"
             )
             return SellSignal(
                 ticker,
@@ -384,7 +426,8 @@ class RSIStrategy(BaseStrategy):
                         values={
                             "pnl_pct": round(pnl_pct, 4),
                             "rsi_1h": round(rsi, 4),
-                            "rsi_sell_threshold": float(_RSI_SELL),
+                            "rsi_sell_threshold": float(rsi_sell_thr),
+                            "adaptive_tier": "3pct" if pnl_pct >= 3 else ("1pct" if pnl_pct >= 1 else "base"),
                         },
                         include_market_context=True,
                     )
@@ -399,29 +442,46 @@ class RSIStrategy(BaseStrategy):
                 buy_time = buy_time.replace(tzinfo=_KST)
             elapsed_hours = (datetime.now(_KST) - buy_time).total_seconds() / 3600
             if elapsed_hours >= _MAX_HOLD_HOURS:
-                reason = f"MAX_HOLD_EXPIRED({elapsed_hours:.0f}h|pnl={pnl_pct:+.2f}%)"
-                logger.info(f"[mr_rsi] exit on max hold | {ticker} | {reason}")
-                return SellSignal(
-                    ticker,
-                    True,
-                    current_price,
-                    reason,
-                    metadata={
-                        "signal_trace": self._build_sell_signal_trace(
-                            ticker,
-                            current_price,
-                            position,
-                            should_sell=True,
-                            reason=reason,
-                            values={
-                                "pnl_pct": round(pnl_pct, 4),
-                                "elapsed_hours": round(elapsed_hours, 4),
-                                "max_hold_hours": float(_MAX_HOLD_HOURS),
-                            },
-                            include_market_context=True,
-                        )
-                    },
-                )
+                # v6: extend if position is in recovery zone
+                in_recovery = -2.0 < pnl_pct < 3.0 and rsi < 55.0
+                effective_max = _MAX_HOLD_HOURS + (_MAX_HOLD_EXTEND_HOURS if in_recovery else 0)
+
+                if elapsed_hours >= effective_max:
+                    reason = (
+                        f"MAX_HOLD_EXPIRED({elapsed_hours:.0f}h>={effective_max:.0f}h"
+                        f"|pnl={pnl_pct:+.2f}%)"
+                    )
+                    logger.info(f"[mr_rsi] exit on max hold | {ticker} | {reason}")
+                    return SellSignal(
+                        ticker,
+                        True,
+                        current_price,
+                        reason,
+                        metadata={
+                            "signal_trace": self._build_sell_signal_trace(
+                                ticker,
+                                current_price,
+                                position,
+                                should_sell=True,
+                                reason=reason,
+                                values={
+                                    "pnl_pct": round(pnl_pct, 4),
+                                    "elapsed_hours": round(elapsed_hours, 4),
+                                    "base_max_hold": float(_MAX_HOLD_HOURS),
+                                    "extended": in_recovery,
+                                    "effective_max_hours": float(effective_max),
+                                    "rsi_1h": round(rsi, 4),
+                                },
+                                include_market_context=True,
+                            )
+                        },
+                    )
+                else:
+                    logger.info(
+                        f"[mr_rsi] max-hold extended | {ticker} | "
+                        f"{elapsed_hours:.1f}h / {effective_max:.0f}h | "
+                        f"pnl={pnl_pct:+.2f}% RSI={rsi:.1f}"
+                    )
         except Exception as exc:
             logger.debug(f"[mr_rsi] max-hold calculation error: {exc}")
 

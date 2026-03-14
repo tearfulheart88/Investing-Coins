@@ -279,6 +279,7 @@ GEMINI_MAX_TRADES: int = 50              # 분석에 사용할 최근 거래 수
 # REENTRY_ENABLED_SCENARIOS: 재진입을 활성화할 시나리오 ID 집합
 #   예) {"vb_noise_filter", "mr_rsi"}
 #       빈 set() = 전체 비활성화
+MAX_REENTRY_COUNT: int = 3             # 최대 재진입 횟수 (무한 루프 방지)
 REENTRY_ENABLED_SCENARIOS: set = {      # 기본값: 전체 전략 활성화
     "vb_noise_filter",
     "vb_standard",
