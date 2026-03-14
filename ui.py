@@ -1,5 +1,5 @@
 """
-Upbit 자동매매 시스템 — GUI v2
+Upbit 자동매매 시스템 — GUI v3  (Obsidian Pro 테마)
 실행: python ui.py
 """
 from __future__ import annotations
@@ -56,20 +56,64 @@ SCENARIO_TO_STRATEGY_KEY = {
 
 ALL_TICKERS: list[str] = []   # 런타임에 동적으로 채워짐
 
-# Catppuccin Mocha 팔레트
+# ── Obsidian Pro 팔레트 ──────────────────────────────────────────────────────
+# 블루틴트 딥블랙 + 네온 포인트 조합
+# BG 계열: 순수 블랙 대신 미세한 블루 틴트로 "인텔리전스" 느낌
+# 액센트:  전기 블루 (#4dabf7)  →  수익/손실은 네온 그린/레드로 강한 대비
 C = type("C", (), {
-    "BG":      "#1e1e2e",
-    "BG2":     "#313244",
-    "BG3":     "#45475a",
-    "FG":      "#cdd6f4",
-    "ACCENT":  "#89b4fa",
-    "GREEN":   "#a6e3a1",
-    "RED":     "#f38ba8",
-    "YELLOW":  "#f9e2af",
-    "PEACH":   "#fab387",
-    "SUB":     "#6c7086",
-    "HEADER":  "#11111b",
+    "BG":      "#080b10",   # 딥 미드나잇 블랙 (블루틴트)
+    "BG2":     "#0f1520",   # 패널/카드 배경
+    "BG3":     "#182030",   # 호버/엘리베이티드
+    "BG4":     "#1f2b3e",   # 선택/활성 표면
+    "FG":      "#dde8f8",   # 쿨 화이트 (눈 편안)
+    "ACCENT":  "#4dabf7",   # 전기 블루 (주 포인트)
+    "GREEN":   "#26d97f",   # 네온 에메랄드 (수익)
+    "RED":     "#ff5370",   # 비비드 코랄 레드 (손실)
+    "YELLOW":  "#ffd166",   # 웜 앰버 (경고)
+    "PEACH":   "#ff9066",   # 비비드 오렌지 (실제거래 버튼)
+    "SUB":     "#5a7296",   # 뮤트 블루그레이
+    "HEADER":  "#04060a",   # 탑바 순흑
+    "BORDER":  "#1e2d44",   # 경계선 블루틴트
+    "CYAN":    "#38d9f5",   # 사이언 (보조 포인트)
+    "PURPLE":  "#9b8cff",   # 퍼플 (가상거래 버튼)
 })()
+
+
+# ─── ModernButton — 호버 시 밝아지는 효과 ────────────────────────────────────
+
+class ModernButton(tk.Button):
+    """호버 인/아웃 시 배경색을 부드럽게 밝혀주는 버튼."""
+
+    def __init__(self, master, **kw) -> None:
+        self._base_bg = kw.get("bg", C.BG3)
+        self._base_fg = kw.get("fg", C.FG)
+        kw.setdefault("relief", "flat")
+        kw.setdefault("borderwidth", 0)
+        kw.setdefault("cursor", "hand2")
+        super().__init__(master, **kw)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+
+    def _on_enter(self, _=None) -> None:
+        if str(self["state"]) != "disabled":
+            try:
+                self.configure(bg=self._lighten(self._base_bg, 28))
+            except Exception:
+                pass
+
+    def _on_leave(self, _=None) -> None:
+        try:
+            self.configure(bg=self._base_bg)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _lighten(hex_color: str, amount: int = 28) -> str:
+        hx = hex_color.lstrip("#")
+        r = min(255, int(hx[0:2], 16) + amount)
+        g = min(255, int(hx[2:4], 16) + amount)
+        b = min(255, int(hx[4:6], 16) + amount)
+        return f"#{r:02x}{g:02x}{b:02x}"
 
 
 # ─── 실제거래 시나리오 행 데이터 ─────────────────────────────────────────────────
@@ -133,9 +177,9 @@ class TradingApp(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("Upbit 자동매매 시스템  v3")
-        self.geometry("1200x820")
-        self.minsize(960, 680)
+        self.title("◈ Upbit Alpha Pro  —  자동매매 시스템")
+        self.geometry("1360x900")
+        self.minsize(1024, 720)
         self.configure(bg=C.BG)
         self._init_fonts()
 
@@ -527,22 +571,58 @@ class TradingApp(tk.Tk):
     def _apply_style(self) -> None:
         s = ttk.Style(self)
         s.theme_use("clam")
-        s.configure("TNotebook",       background=C.BG,  borderwidth=0)
-        s.configure("TNotebook.Tab",   background=C.BG2, foreground=C.FG,
-                    padding=[12, 5], font=self._ui_font(9))
+
+        # ── Notebook ────────────────────────────────────────────────────────
+        s.configure("TNotebook",
+                    background=C.BG, borderwidth=0, tabmargins=[0, 0, 0, 0])
+        s.configure("TNotebook.Tab",
+                    background=C.BG2, foreground=C.SUB,
+                    padding=[16, 7], font=self._ui_font(9, "bold"),
+                    borderwidth=0)
         s.map("TNotebook.Tab",
-              background=[("selected", C.BG3)],
-              foreground=[("selected", C.ACCENT)])
-        s.configure("Treeview",        background=C.BG2, foreground=C.FG,
-                    fieldbackground=C.BG2, rowheight=26, font=self._mono_font(9))
-        s.configure("Treeview.Heading", background=C.BG3, foreground=C.ACCENT,
-                    font=self._ui_font(9, "bold"))
-        s.map("Treeview", background=[("selected", C.BG3)])
-        s.configure("TCombobox",       fieldbackground=C.BG3,
-                    background=C.BG3, foreground=C.FG, arrowcolor=C.FG)
-        s.map("TCombobox", fieldbackground=[("readonly", C.BG3)])
-        s.configure("Vertical.TScrollbar", background=C.BG3,
-                    troughcolor=C.BG2, arrowcolor=C.FG)
+              background=[("selected", C.BG3), ("active", C.BG3)],
+              foreground=[("selected", C.ACCENT), ("active", C.FG)])
+
+        # ── Treeview ────────────────────────────────────────────────────────
+        s.configure("Treeview",
+                    background=C.BG2, foreground=C.FG,
+                    fieldbackground=C.BG2, rowheight=32,
+                    font=self._mono_font(9), borderwidth=0)
+        s.configure("Treeview.Heading",
+                    background=C.BG3, foreground=C.ACCENT,
+                    font=self._ui_font(9, "bold"),
+                    relief="flat", borderwidth=0)
+        s.map("Treeview",
+              background=[("selected", C.BG4)],
+              foreground=[("selected", C.FG)])
+
+        # ── Combobox ────────────────────────────────────────────────────────
+        s.configure("TCombobox",
+                    fieldbackground=C.BG3, background=C.BG3,
+                    foreground=C.FG, arrowcolor=C.ACCENT,
+                    bordercolor=C.BORDER, selectbackground=C.BG4,
+                    selectforeground=C.FG)
+        s.map("TCombobox",
+              fieldbackground=[("readonly", C.BG3), ("focus", C.BG4)],
+              bordercolor=[("focus", C.ACCENT)])
+
+        # ── Scrollbar ───────────────────────────────────────────────────────
+        s.configure("Vertical.TScrollbar",
+                    background=C.BG3, troughcolor=C.BG2,
+                    arrowcolor=C.SUB, borderwidth=0, relief="flat")
+        s.map("Vertical.TScrollbar",
+              background=[("active", C.BG4)])
+
+        # ── Scale (슬라이더) ─────────────────────────────────────────────────
+        s.configure("TScale",
+                    background=C.BG2, troughcolor=C.BG3,
+                    sliderlength=16, borderwidth=0)
+        s.configure("Horizontal.TScale",
+                    background=C.BG2, troughcolor=C.BORDER,
+                    sliderlength=14)
+
+        # ── Separator ───────────────────────────────────────────────────────
+        s.configure("TSeparator", background=C.BORDER)
 
     # ─── UI 전체 구조 ─────────────────────────────────────────────────────────
 
@@ -564,61 +644,80 @@ class TradingApp(tk.Tk):
     # ─── 상단바 ──────────────────────────────────────────────────────────────
 
     def _build_topbar(self) -> None:
-        bar = tk.Frame(self, bg=C.HEADER, pady=9)
+        # 외부 컨테이너: 탑바 본체 + 하단 액센트 라인
+        outer = tk.Frame(self, bg=C.HEADER)
+        outer.pack(fill="x")
+
+        bar = tk.Frame(outer, bg=C.HEADER, pady=11)
         bar.pack(fill="x")
 
+        # 하단 2px 전기 블루 액센트 라인 (Obsidian Pro 시그니처)
+        tk.Frame(outer, bg=C.ACCENT, height=2).pack(fill="x")
+
+        # ── 좌측: 타이틀 + 상태 인디케이터 ──────────────────────────────────
+
+        # 브랜드 타이틀 (좌측 패딩 포함)
+        tk.Label(bar, text="◈",
+                 font=("Arial", 14, "bold"), fg=C.ACCENT,
+                 bg=C.HEADER).pack(side="left", padx=(14, 4))
+        tk.Label(bar, text="Upbit Alpha Pro",
+                 font=self._ui_font(13, "bold"), fg=C.FG,
+                 bg=C.HEADER).pack(side="left")
+
+        # 구분선
+        tk.Label(bar, text="  ╱  ", font=("Arial", 11),
+                 fg=C.BORDER, bg=C.HEADER).pack(side="left")
+
         # 실제거래 상태 인디케이터
-        self._real_dot = tk.Label(bar, text="●", font=("Arial", 13),
+        self._real_dot = tk.Label(bar, text="●", font=("Arial", 11),
                                    fg=C.RED, bg=C.HEADER)
-        self._real_dot.pack(side="left", padx=(12, 2))
+        self._real_dot.pack(side="left", padx=(2, 3))
         self._real_lbl = tk.Label(bar, text="실제: 정지",
-                                   font=("Arial", 10, "bold"),
-                                   fg=C.FG, bg=C.HEADER)
+                                   font=self._ui_font(9, "bold"),
+                                   fg=C.SUB, bg=C.HEADER)
         self._real_lbl.pack(side="left")
 
-        tk.Label(bar, text="  │  ", font=("Arial", 10),
-                 fg=C.SUB, bg=C.HEADER).pack(side="left")
+        tk.Label(bar, text="  ·  ", font=("Arial", 10),
+                 fg=C.BORDER, bg=C.HEADER).pack(side="left")
 
         # 가상거래 상태 인디케이터
-        self._paper_dot = tk.Label(bar, text="●", font=("Arial", 13),
+        self._paper_dot = tk.Label(bar, text="●", font=("Arial", 11),
                                     fg=C.RED, bg=C.HEADER)
-        self._paper_dot.pack(side="left", padx=(0, 2))
+        self._paper_dot.pack(side="left", padx=(0, 3))
         self._paper_lbl = tk.Label(bar, text="가상: 정지",
-                                    font=("Arial", 10, "bold"),
-                                    fg=C.FG, bg=C.HEADER)
+                                    font=self._ui_font(9, "bold"),
+                                    fg=C.SUB, bg=C.HEADER)
         self._paper_lbl.pack(side="left")
 
-        tk.Label(bar, text="  Upbit 자동매매 시스템",
-                 font=("Arial", 12, "bold"), fg=C.ACCENT,
-                 bg=C.HEADER).pack(side="left", padx=10)
-
-        # 우측: 타이머 / 자산 / GitHub 업로드
-        self._timer_label = tk.Label(bar, text="⏱ —",
-                                      font=("Consolas", 10), fg=C.YELLOW,
-                                      bg=C.HEADER)
-        self._timer_label.pack(side="right", padx=8)
-        self._equity_label = tk.Label(bar, text="자산: —",
-                                       font=("Arial", 11, "bold"),
-                                       fg=C.GREEN, bg=C.HEADER)
-        self._equity_label.pack(side="right", padx=12)
+        # ── 우측: 자산 / 타이머 / GitHub ────────────────────────────────────
 
         # GitHub 자동 업로드 버튼 — GITHUB_UPLOAD_ENABLED=true 일 때만 표시
-        # (다른 사람이 클론해도 .env 미설정 → 버튼 숨김)
         self._git_btn = None
-        self._git_status_label = tk.Label(bar, text="", font=("Arial", 8),
+        self._git_status_label = tk.Label(bar, text="", font=self._ui_font(8),
                                            fg=C.SUB, bg=C.HEADER)
         if config.GITHUB_UPLOAD_ENABLED:
-            tk.Label(bar, text="│", fg=C.SUB, bg=C.HEADER).pack(side="right", padx=4)
-            self._git_btn = tk.Button(
-                bar, text="↑ GitHub",
-                font=("Arial", 9, "bold"),
-                bg=C.BG2, fg=C.ACCENT,
-                relief="flat", bd=0, padx=10, pady=3,
-                cursor="hand2",
+            self._git_btn = ModernButton(
+                bar, text="⬆  GitHub",
+                font=self._ui_font(9, "bold"),
+                bg=C.BG3, fg=C.ACCENT,
+                padx=12, pady=4,
                 command=self._on_git_upload,
             )
-            self._git_btn.pack(side="right", padx=(4, 0))
-            self._git_status_label.pack(side="right", padx=(0, 2))
+            self._git_btn.pack(side="right", padx=(4, 14))
+            self._git_status_label.pack(side="right", padx=(0, 4))
+            tk.Label(bar, text="│", fg=C.BORDER, bg=C.HEADER).pack(side="right", padx=6)
+
+        # 타이머
+        self._timer_label = tk.Label(bar, text="⏱  —",
+                                      font=self._mono_font(10), fg=C.YELLOW,
+                                      bg=C.HEADER)
+        self._timer_label.pack(side="right", padx=(0, 14))
+
+        # 자산
+        self._equity_label = tk.Label(bar, text="자산: —",
+                                       font=self._ui_font(12, "bold"),
+                                       fg=C.GREEN, bg=C.HEADER)
+        self._equity_label.pack(side="right", padx=(0, 6))
 
     # ─── 좌측 패널 ───────────────────────────────────────────────────────────
 
